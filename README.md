@@ -1,5 +1,6 @@
 # 连点器 Pro (Auto Clicker Pro)
 
+！！全程AI制作，单纯自用所以免费开源。！！
 高级屏幕点击自动化工具，支持单点点击、操作录制回放、可视化流程编辑。
 
 ## 功能一览
@@ -84,5 +85,5 @@ MIT License
 如果感觉好用或者给你提供了思路，可以赞助一下，几块钱也不嫌少的，谢谢喵 :cat:
 
 <p align="center">
-  <img src="donate.png" width="300" alt="支付宝收款码">
+  <img src="donate.jpg" width="300" alt="支付宝收款码">
 </p>
