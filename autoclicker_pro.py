@@ -861,6 +861,7 @@ class Recorder:
                 now = round(time.time() - self._t0, 3)
                 if key_name in _MODIFIER_KEYS:
                     _mods_pressed.add(_MODIFIER_UNIFY.get(key_name, key_name))
+                    _key_press_times[key_str] = now
                     return True
                 # 记录按下时间
                 _key_press_times[key_str] = now
