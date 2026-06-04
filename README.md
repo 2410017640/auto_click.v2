@@ -76,3 +76,13 @@ autoclicker/
 ## 许可
 
 MIT License
+
+---
+
+## 赞助
+
+如果感觉好用或者给你提供了思路，可以赞助一下，几块钱也不嫌少的，谢谢喵 :cat:
+
+<p align="center">
+  <img src="donate.png" width="300" alt="支付宝收款码">
+</p>
