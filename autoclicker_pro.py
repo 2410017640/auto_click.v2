@@ -4,7 +4,7 @@
 连点器 Pro (Auto Clicker Pro) - 高级屏幕点击自动化工具
 
 功能：
-  1. 手动点击 - 坐标输入/取点，设置次数/间隔/速度
+  1. 单点点击 - 坐标输入/取点，设置次数/间隔/速度
   2. 操作录制 - 录制点击操作并复现
   3. 录制管理 - 保存/重命名/删除录制
   4. 高级模式 - 可视化流程编辑器，支持截图匹配、分支逻辑、循环跳转
@@ -753,6 +753,9 @@ class Recorder:
                         'x': int(x), 'y': int(y),
                         'button': btn,
                         'time': now,
+                        'press_time': now,
+                        'release_time': now,   # 初始等于 press_time，松开时更新
+                        'hold_duration': 0.0,
                     }
                     _emit(ev)
                     self._drag_state['_emitted'] = True
@@ -762,6 +765,9 @@ class Recorder:
                         'x': int(x), 'y': int(y),
                         'button': btn,
                         'time': now,
+                        'press_time': now,
+                        'release_time': now,
+                        'hold_duration': 0.0,
                     }
                     _emit(ev)
             else:
@@ -773,7 +779,6 @@ class Recorder:
                     if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
                         # 是拖动操作：替换之前发出的 click 为 drag
                         if ds['_emitted'] and len(self._events) > 0:
-                            # 移除之前发出的 click 事件
                             self._events.pop()
                             if self._on_event:
                                 try:
@@ -789,6 +794,20 @@ class Recorder:
                             'duration': round(now - ds['t0'], 3),
                         }
                         _emit(ev)
+                    else:
+                        # 普通点击：更新 release_time 和 hold_duration
+                        hold = round(now - ds['t0'], 3)
+                        if ds['_emitted'] and len(self._events) > 0:
+                            last_ev = self._events[-1]
+                            last_ev['release_time'] = now
+                            last_ev['hold_duration'] = hold
+                else:
+                    # 非拖动录制模式下的松开：更新最近一个 click 的 release_time
+                    if len(self._events) > 0:
+                        last_ev = self._events[-1]
+                        if last_ev.get('type') == 'click' and last_ev.get('release_time', 0) == last_ev.get('time', 0):
+                            last_ev['release_time'] = now
+                            last_ev['hold_duration'] = round(now - last_ev['time'], 3)
             return True
 
         def _on_move(x, y):
@@ -825,10 +844,11 @@ class Recorder:
         # 键盘录制（追踪修饰键状态，支持组合键）
         self._kl = None
         if record_key:
-            _mods_pressed = set()  # 当前按下的修饰键（统一后）
+            _mods_pressed = set()
             _MODIFIER_KEYS = {'Key.ctrl_l', 'Key.ctrl_r', 'Key.shift_l', 'Key.shift_r',
                               'Key.alt_l', 'Key.alt_r', 'Key.cmd', 'Key.cmd_l', 'Key.cmd_r',
                               'Key.alt_gr', 'Key.shift', 'Key.ctrl', 'Key.alt'}
+            _key_press_times = {}  # key -> press_time，用于计算按住时长
 
             def _on_press(key):
                 if not self._recording:
@@ -840,16 +860,19 @@ class Recorder:
                 key_name = str(key)
                 now = round(time.time() - self._t0, 3)
                 if key_name in _MODIFIER_KEYS:
-                    # 修饰键：统一左右为标准名
                     _mods_pressed.add(_MODIFIER_UNIFY.get(key_name, key_name))
                     return True
-                # 普通按键（含特殊键如 enter/space/f1 等）
+                # 记录按下时间
+                _key_press_times[key_str] = now
                 mods_list = sorted(_mods_pressed)
                 ev = {
                     'type': 'key',
                     'key': key_str,
-                    'mods': mods_list,  # 修饰键列表（已统一）
+                    'mods': mods_list,
                     'time': now,
+                    'press_time': now,
+                    'release_time': now,
+                    'hold_duration': 0.0,
                 }
                 _emit(ev)
                 return True
@@ -858,6 +881,19 @@ class Recorder:
                 key_name = str(key)
                 unified = _MODIFIER_UNIFY.get(key_name, key_name)
                 _mods_pressed.discard(unified)
+                # 更新最近一个同名按键事件的 release_time 和 hold_duration
+                try:
+                    key_str = key.char
+                except AttributeError:
+                    key_str = str(key)
+                now = round(time.time() - self._t0, 3)
+                press_t = _key_press_times.pop(key_str, None)
+                if press_t is not None and self._events:
+                    for ev in reversed(self._events):
+                        if ev.get('type') == 'key' and ev.get('key') == key_str and ev.get('release_time', 0) == ev.get('time', 0):
+                            ev['release_time'] = now
+                            ev['hold_duration'] = round(now - press_t, 3)
+                            break
 
             self._kl = pynput_keyboard.Listener(on_press=_on_press, on_release=_on_release)
             self._kl.start()
@@ -933,11 +969,15 @@ class Recorder:
                         if ev['type'] == 'click':
                             cx, cy = int(ev['x'] * sx), int(ev['y'] * sy)
                             dx, dy = ClickEngine._random_offset(radius)
-                            pyautogui.click(
-                                x=cx + dx,
-                                y=cy + dy,
-                                button=ev.get('button', 'left')
-                            )
+                            hold = ev.get('hold_duration', 0)
+                            btn = ev.get('button', 'left')
+                            if hold > 0.005:
+                                # 有按住时长：mouseDown → sleep → mouseUp
+                                pyautogui.mouseDown(x=cx + dx, y=cy + dy, button=btn)
+                                time.sleep(hold / speed)
+                                pyautogui.mouseUp(x=cx + dx, y=cy + dy, button=btn)
+                            else:
+                                pyautogui.click(x=cx + dx, y=cy + dy, button=btn)
                         elif ev['type'] == 'drag':
                             x0 = int(ev['x0'] * sx)
                             y0 = int(ev['y0'] * sy)
@@ -966,6 +1006,10 @@ class Recorder:
                                 int(ev['y'] * sy),
                                 duration=0
                             )
+                            # 移动后等待 hold_duration（可编辑的额外延迟）
+                            move_hold = ev.get('hold_duration', 0)
+                            if move_hold > 0:
+                                time.sleep(move_hold / speed)
                         elif ev['type'] == 'key':
                             key_str = ev.get('key', '')
                             if key_str:
@@ -1266,10 +1310,24 @@ class StepEditDialog(tk.Toplevel):
         fr.pack(fill='x')
         ttk.Label(fr, text="随机偏移半径:").pack(side='left')
         self.var_click_radius = tk.IntVar(value=0)
-        ttk.Spinbox(fr, from_=0, to=500, textvariable=self.var_click_radius,
-                     width=10).pack(side='left', padx=4)
-        ttk.Label(fr, text="像素 (0=精确点击，模拟真人随机偏移)",
+        self.spb_click_radius = ttk.Spinbox(fr, from_=0, to=30, textvariable=self.var_click_radius,
+                     width=5, command=lambda: self._on_radius_change(
+                         self.var_click_radius, self.canvas_radius_preview))
+        self.spb_click_radius.pack(side='left', padx=4)
+        self.scale_click_radius = ttk.Scale(fr, from_=0, to=30, variable=self.var_click_radius,
+                                             orient='horizontal', length=120,
+                                             command=lambda v: self._on_radius_change(
+                                                 self.var_click_radius, self.canvas_radius_preview))
+        self.scale_click_radius.pack(side='left', padx=4)
+        ttk.Label(fr, text="(0~30)",
                   foreground='gray').pack(side='left')
+        # 圆圈预览
+        self.canvas_radius_preview = tk.Canvas(fr, width=64, height=64,
+                                                bg='white', highlightthickness=1,
+                                                highlightbackground='#CCCCCC')
+        self.canvas_radius_preview.pack(side='right', padx=8)
+        self.canvas_radius_preview.update_idletasks()
+        self._draw_radius_circle(self.canvas_radius_preview, 0)
 
         # 按键设置
         self.key_frame = ttk.LabelFrame(parent, text="按键设置", padding=8)
@@ -2190,7 +2248,7 @@ class AutoClickerApp:
         self.nb.pack(fill='both', expand=True, **pad)
 
         f1 = ttk.Frame(self.nb, padding=12)
-        self.nb.add(f1, text='  🖱️ 手动点击  ')
+        self.nb.add(f1, text='  🖱️ 单点点击  ')
         self._build_manual_tab(f1)
 
         f2 = ttk.Frame(self.nb, padding=12)
@@ -2219,7 +2277,7 @@ class AutoClickerApp:
         ttk.Label(sbar, textvariable=self.sv_pos,
                   foreground='gray').pack(side='right')
 
-    # ──────── Tab 1: 手动点击 ────────
+    # ──────── Tab 1: 单点点击 ────────
     def _build_manual_tab(self, parent):
         row = 0
         parent.columnconfigure(0, weight=1)
@@ -2311,10 +2369,24 @@ class AutoClickerApp:
         ttk.Label(f, text="容错范围:", width=10,
                   anchor='e').pack(side='left')
         self.var_radius = tk.IntVar(value=0)
-        ttk.Spinbox(f, from_=0, to=500, textvariable=self.var_radius,
-                     width=10).pack(side='left')
-        ttk.Label(f, text="像素 (0=精确点击)",
-                  foreground='gray').pack(side='left', padx=6)
+        self.spb_radius = ttk.Spinbox(f, from_=0, to=30, textvariable=self.var_radius,
+                     width=5, command=lambda: self._on_radius_change(
+                         self.var_radius, self.canvas_radius_rec))
+        self.spb_radius.pack(side='left')
+        self.scale_radius = ttk.Scale(f, from_=0, to=30, variable=self.var_radius,
+                                       orient='horizontal', length=120,
+                                       command=lambda v: self._on_radius_change(
+                                           self.var_radius, self.canvas_radius_rec))
+        self.scale_radius.pack(side='left', padx=4)
+        ttk.Label(f, text="(0~30)",
+                  foreground='gray').pack(side='left')
+        # 圆圈预览（先 pack right 确保可见）
+        self.canvas_radius_rec = tk.Canvas(f, width=64, height=64,
+                                            bg='white', highlightthickness=1,
+                                            highlightbackground='#CCCCCC')
+        self.canvas_radius_rec.pack(side='right', padx=8)
+        self.canvas_radius_rec.update_idletasks()
+        self._draw_radius_circle(self.canvas_radius_rec, 0)
 
         # ---- 操作按钮 ----
         bf = ttk.Frame(parent)
@@ -2335,19 +2407,9 @@ class AutoClickerApp:
                   foreground='gray').grid(row=row, column=0)
         row += 1
 
-    def _apply_edit(self, item_id, idx, delay_var, dialog):
-        """保存编辑的延迟值"""
-        try:
-            new_delay = float(delay_var.get())
-            if idx < len(self._current_events):
-                ev = self._current_events[idx]
-                ev['_extra_delay'] = new_delay
-            vals = list(self.tree_events.item(item_id, 'values'))
-            vals[5] = f"{new_delay:.3f}" if new_delay != 0 else '-'
-            self.tree_events.item(item_id, values=vals)
-            dialog.destroy()
-        except ValueError:
-            messagebox.showwarning("输入错误", "请输入有效的数字", parent=dialog)
+    def _apply_edit(self, item_id, idx, delay_var, dialog, hold_var=None):
+        """兼容旧接口，实际编辑已改为 inline 方式"""
+        dialog.destroy()
 
     def _delete_event(self, idx, item_id, dialog=None):
         """删除事件行"""
@@ -2355,7 +2417,7 @@ class AutoClickerApp:
             try:
                 dialog.destroy()
             except tk.TclError:
-                pass  # 窗口已关闭
+                pass
         self._current_events.pop(idx)
         self.tree_events.delete(item_id)
         for i, cid in enumerate(self.tree_events.get_children(), 1):
@@ -2378,6 +2440,11 @@ class AutoClickerApp:
                                         command=self._stop_rec, width=14,
                                         state='disabled')
         self.btn_rec_stop.pack(side='left', padx=4)
+        # 在此插入按钮
+        self.btn_insert_rec = ttk.Button(bf, text="➕ 在此插入",
+                                          command=self._start_insert_rec, width=14,
+                                          state='disabled')
+        self.btn_insert_rec.pack(side='left', padx=4)
         self.sv_rec_status = tk.StringVar(value="未录制")
         cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
         ttk.Label(bf, textvariable=self.sv_rec_status,
@@ -2402,30 +2469,71 @@ class AutoClickerApp:
         lf2 = ttk.LabelFrame(parent, text="录制事件", padding=10)
         lf2.pack(fill='both', expand=True, pady=(0, 8))
 
-        cols = ('seq', 'type', 'pos', 'button', 'time', 'delay', 'action')
+        # 事件列表工具栏：显示/隐藏移动轨迹
+        ev_toolbar = ttk.Frame(lf2)
+        ev_toolbar.pack(fill='x', pady=(0, 4))
+        self.var_show_moves = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ev_toolbar, text="显示移动轨迹",
+                        variable=self.var_show_moves,
+                        command=self._toggle_move_visibility).pack(side='left')
+        ttk.Label(ev_toolbar, text="(默认隐藏，勾选后显示所有移动事件)",
+                  foreground='gray', font=('Microsoft YaHei UI', 8)).pack(side='left', padx=8)
+
+        cols = ('seq', 'type', 'pos', 'button', 'time', 'hold', 'delay')
         self.tree_events = ttk.Treeview(lf2, columns=cols,
                                          show='headings', height=8)
         self.tree_events.heading('seq',    text='#')
         self.tree_events.heading('type',   text='类型')
         self.tree_events.heading('pos',    text='位置')
         self.tree_events.heading('button', text='按键')
-        self.tree_events.heading('time',   text='时间(s)')
+        self.tree_events.heading('time',   text='发生时间')
+        self.tree_events.heading('hold',   text='按住(s)')
         self.tree_events.heading('delay',  text='延迟(s)')
-        self.tree_events.heading('action', text='编辑')
         self.tree_events.column('seq',    width=35,  anchor='center')
         self.tree_events.column('type',   width=55,  anchor='center')
         self.tree_events.column('pos',    width=170, anchor='center')
         self.tree_events.column('button', width=55,  anchor='center')
-        self.tree_events.column('time',   width=65,  anchor='center')
-        self.tree_events.column('delay',  width=60,  anchor='center')
-        self.tree_events.column('action', width=70,  anchor='center')
+        self.tree_events.column('time',   width=90,  anchor='center')
+        self.tree_events.column('hold',   width=65,  anchor='center')
+        self.tree_events.column('delay',  width=65,  anchor='center')
 
-        # 编辑按钮列样式：模拟可点击按钮外观
-        self.tree_events.tag_configure('edit_btn', foreground='#1565C0',
-                                        font=('Segoe UI', 9, 'underline'))
-        self.tree_events.tag_configure('edit_btn_active', foreground='#0D47A1',
+        # 可编辑列高亮样式
+        self.tree_events.tag_configure('editable_cell', foreground='#1565C0',
+                                        font=('Consolas', 9, 'underline'))
+        # 各类事件背景色（浅色，不影响字体）
+        # 移动
+        self.tree_events.tag_configure('move_child', foreground='#666666',
+                                        background='#E8F5E9',
+                                        font=('Consolas', 8))
+        # 移动折叠组（稍深）
+        self.tree_events.tag_configure('move_group', foreground='#2E7D32',
+                                        background='#C8E6C9',
+                                        font=('Microsoft YaHei UI', 9))
+        # 点击
+        self.tree_events.tag_configure('click_row', foreground='#1A237E',
                                         background='#E3F2FD',
-                                        font=('Segoe UI', 9, 'bold underline'))
+                                        font=('Microsoft YaHei UI', 9, 'bold'))
+        # 拖动
+        self.tree_events.tag_configure('drag_row', foreground='#E65100',
+                                        background='#FFF3E0',
+                                        font=('Microsoft YaHei UI', 9, 'bold'))
+        # 键盘按键
+        self.tree_events.tag_configure('key_row', foreground='#4A148C',
+                                        background='#F3E5F5',
+                                        font=('Microsoft YaHei UI', 9, 'bold'))
+        # 插入位置标记
+        self.tree_events.tag_configure('insert_marker', foreground='#B71C1C',
+                                        background='#FFEB3B',
+                                        font=('Microsoft YaHei UI', 9, 'bold'))
+        # 插入操作（斜体，不参与原编号）
+        self.tree_events.tag_configure('inserted_row', font=('Consolas', 9, 'italic'),
+                                        foreground='#00695C')
+
+        # 事件类型 → 标签名映射
+        self._ev_type_tags = {
+            'move': 'move_child', 'click': 'click_row',
+            'drag': 'drag_row', 'key': 'key_row',
+        }
 
         sb = ttk.Scrollbar(lf2, orient='vertical',
                            command=self.tree_events.yview)
@@ -2433,131 +2541,169 @@ class AutoClickerApp:
         self.tree_events.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
 
-        # tree_events 点击处理（删除/编辑延迟）
+        # ---- Inline 编辑：点击 delay 或 hold 列时弹出 Entry 覆盖 ----
+        self._inline_entry = None      # 当前活跃的编辑 Entry
+        self._inline_item = None       # 正在编辑的 item id
+        self._inline_col = None        # 正在编辑的列名
+
+        def _commit_inline():
+            """提交 inline 编辑的值"""
+            if self._inline_entry is None:
+                return
+            try:
+                new_val = float(self._inline_entry.get())
+                new_val = max(0.0, new_val)
+            except ValueError:
+                new_val = 0.0
+            item = self._inline_item
+            col = self._inline_col
+            # 用 seq 号定位事件（兼容 move 子行和插入事件）
+            vals = list(self.tree_events.item(item, 'values'))
+            try:
+                seq_num = int(vals[0])
+                idx = seq_num - 1  # 1-based → 0-based
+            except (ValueError, TypeError):
+                # "插入N" 格式：遍历 _current_events 找到对应事件
+                seq_str = str(vals[0])
+                idx = None
+                if seq_str.startswith('插入'):
+                    try:
+                        insert_num = int(seq_str[2:])
+                        for k, ev in enumerate(self._current_events):
+                            if ev.get('_is_insert') and ev.get('_insert_num') == insert_num:
+                                idx = k
+                                break
+                    except ValueError:
+                        pass
+                if idx is None:
+                    try:
+                        idx = self.tree_events.index(item)
+                    except Exception:
+                        idx = 0
+            if idx < len(self._current_events):
+                ev = self._current_events[idx]
+                if col == 'delay':
+                    ev['_extra_delay'] = new_val
+                elif col == 'hold':
+                    ev['hold_duration'] = new_val
+                    if ev.get('type') == 'click':
+                        ev['release_time'] = round(ev['time'] + new_val, 3)
+            # 更新显示
+            if col == 'delay':
+                vals[6] = f"{new_val:.3f}" if new_val != 0 else '0.000'
+            elif col == 'hold':
+                vals[5] = f"{new_val:.3f}" if new_val != 0 else '0.000'
+            self.tree_events.item(item, values=vals)
+            _destroy_inline()
+
+        def _destroy_inline():
+            if self._inline_entry:
+                try:
+                    self._inline_entry.destroy()
+                except tk.TclError:
+                    pass
+                self._inline_entry = None
+                self._inline_item = None
+                self._inline_col = None
+
+        def _start_inline_edit(item_id, col_name):
+            """在指定单元格上创建 inline Entry 编辑框"""
+            _commit_inline()  # 先提交之前的编辑
+            # 获取单元格位置
+            bbox = self.tree_events.bbox(item_id, col_name)
+            if not bbox:
+                return
+            x, y, w, h = bbox
+            # 用 seq 号定位事件（兼容 move 子行和插入事件）
+            displayed_vals = list(self.tree_events.item(item_id, 'values'))
+            try:
+                seq_num = int(displayed_vals[0])
+                idx = seq_num - 1
+            except (ValueError, TypeError):
+                seq_str = str(displayed_vals[0])
+                idx = None
+                if seq_str.startswith('插入'):
+                    try:
+                        insert_num = int(seq_str[2:])
+                        for k, ev in enumerate(self._current_events):
+                            if ev.get('_is_insert') and ev.get('_insert_num') == insert_num:
+                                idx = k
+                                break
+                    except ValueError:
+                        pass
+                if idx is None:
+                    try:
+                        idx = self.tree_events.index(item_id)
+                    except Exception:
+                        idx = 0
+            if idx >= len(self._current_events):
+                return
+            ev = self._current_events[idx]
+            if col_name == 'hold' and ev.get('type') == 'drag':
+                return  # 拖动事件不可编辑按住时长（由拖动距离决定）
+            # 从显示值读取（避免 calculated delay 被重置为 0）
+            displayed_vals = list(self.tree_events.item(item_id, 'values'))
+            if col_name == 'delay':
+                current_val = str(displayed_vals[6])  # delay 列（index 6）
+            elif col_name == 'hold':
+                current_val = str(displayed_vals[5])  # hold 列（index 5）
+            else:
+                return
+            # 创建 Entry
+            entry = tk.Entry(self.tree_events, font=('Consolas', 9),
+                             width=8, relief='solid', bd=1)
+            entry.insert(0, current_val)
+            entry.select_range(0, tk.END)
+            entry.focus_set()
+            entry.place(x=x, y=y, width=w, height=h)
+            self._inline_entry = entry
+            self._inline_item = item_id
+            self._inline_col = col_name
+            entry.bind('<Return>', lambda e: _commit_inline())
+            entry.bind('<Escape>', lambda e: _destroy_inline())
+            entry.bind('<FocusOut>', lambda e: _commit_inline())
+
         def _on_tree_click(event):
             col = self.tree_events.identify_column(event.x)
             item_id = self.tree_events.identify_row(event.y)
-            if not item_id:
+            if not item_id or not col:
+                _commit_inline()
                 return
-            # 列索引（identify_column返回#N格式，如#7，需要转成0-based）
-            col_num = int(col.replace('#', ''))   # '#7' -> 7
-            col_idx = col_num - 1                  # 0-based: 6
-            # col_idx: 0=seq,1=type,2=pos,3=button,4=time,5=delay,6=action
-            if col_idx == 6:  # 编辑列 — 弹出编辑对话框
-                idx = self.tree_events.index(item_id)
-                if idx >= len(self._current_events):
-                    return
-                ev = self._current_events[idx]
-                old_delay = ev.get('_extra_delay', 0.0)
-                ev_type = ev.get('type', 'click')
-                old_x = ev.get('x', ev.get('x0', 0))
-                old_y = ev.get('y', ev.get('y0', 0))
-
-                dialog = tk.Toplevel(self.root)
-                dialog.title(f"编辑步骤 #{idx + 1}")
-                dialog.resizable(False, False)
-                dialog.transient(self.root)
-                dialog.grab_set()
-                dialog.configure(bg='#F5F5F5')
-                cx = self.root.winfo_x() + self.root.winfo_width() // 2
-                cy = self.root.winfo_y() + self.root.winfo_height() // 2
-                dialog.geometry(f"340x280+{cx - 170}+{cy - 140}")
-
-                # 类型标签（带图标和彩色背景）
-                type_icons = {'click': '🖱️', 'move': '↔️', 'drag': '↔️', 'key': '⌨️'}
-                type_colors = {'click': '#1976D2', 'move': '#388E3C', 'drag': '#F57C00', 'key': '#7B1FA2'}
-                icon = type_icons.get(ev_type, '❓')
-                color = type_colors.get(ev_type, '#666')
-                header = tk.Frame(dialog, bg=color, height=44)
-                header.pack(fill='x')
-                header.pack_propagate(False)
-                tk.Label(header, text=f"  {icon} 步骤 #{idx + 1}  —  {ev_type.upper()}",
-                         bg=color, fg='white', font=('Microsoft YaHei UI', 11, 'bold')).pack(side='left', padx=8)
-
-                # 信息区
-                info_frame = tk.Frame(dialog, bg='#F5F5F5')
-                info_frame.pack(fill='x', padx=20, pady=(12, 0))
-                if ev_type in ('click', 'move'):
-                    tk.Label(info_frame, text=f"坐标: ({old_x}, {old_y})",
-                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
-                elif ev_type == 'drag':
-                    tk.Label(info_frame, text=f"拖动: ({ev['x0']}, {ev['y0']}) → ({ev['x1']}, {ev['y1']})",
-                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
-                elif ev_type == 'key':
-                    tk.Label(info_frame, text=f"按键: {ev.get('key', '?')}",
-                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
-
-                # 延迟输入
-                delay_frame = tk.Frame(dialog, bg='#F5F5F5')
-                delay_frame.pack(fill='x', padx=20, pady=(10, 0))
-                tk.Label(delay_frame, text="额外延迟（秒）:", bg='#F5F5F5',
-                         font=('Microsoft YaHei UI', 9)).pack(anchor='w')
-                delay_var = tk.StringVar(value=str(old_delay))
-                delay_entry = tk.Entry(delay_frame, textvariable=delay_var, width=30,
-                                       font=('Consolas', 10), relief='solid', bd=1)
-                delay_entry.pack(fill='x', pady=(2, 0))
-
-                # 按钮区
-                btn_frame = tk.Frame(dialog, bg='#F5F5F5')
-                btn_frame.pack(fill='x', padx=20, pady=(16, 16))
-                save_btn = tk.Button(btn_frame, text="✓ 保存",
-                    command=lambda: self._apply_edit(item_id, idx, delay_var, dialog),
-                    bg='#1976D2', fg='white', font=('Microsoft YaHei UI', 9, 'bold'),
-                    relief='flat', cursor='hand2', width=9, activebackground='#1565C0')
-                save_btn.pack(side='left', padx=(0, 6))
-                del_btn = tk.Button(btn_frame, text="✗ 删除",
-                    command=lambda: self._delete_event(idx, item_id, dialog),
-                    bg='#D32F2F', fg='white', font=('Microsoft YaHei UI', 9, 'bold'),
-                    relief='flat', cursor='hand2', width=9, activebackground='#B71C1C')
-                del_btn.pack(side='left', padx=6)
-                cancel_btn = tk.Button(btn_frame, text="取消",
-                    command=dialog.destroy,
-                    bg='#9E9E9E', fg='white', font=('Microsoft YaHei UI', 9),
-                    relief='flat', cursor='hand2', width=9, activebackground='#757575')
-                cancel_btn.pack(side='left', padx=(6, 0))
-            elif col_idx == 5:  # 延迟列 — 弹出编辑
-                current_vals = self.tree_events.item(item_id, 'values')
-                old_delay = current_vals[5]
-                new_delay = simpledialog.askstring("编辑延迟",
-                    "请输入该步骤的延迟时间（秒）:",
-                    initialvalue=str(old_delay) if old_delay != '-' else '0')
-                if new_delay is not None:
-                    try:
-                        delay_val = float(new_delay)
-                        vals = list(current_vals)
-                        vals[5] = f"{delay_val:.3f}"
-                        self.tree_events.item(item_id, values=vals)
-                        idx = self.tree_events.index(item_id)
-                        if idx < len(self._current_events):
-                            self._current_events[idx]['_extra_delay'] = delay_val
-                    except ValueError:
-                        messagebox.showwarning("输入错误", "请输入有效的数字")
+            # 移动折叠组：点击展开/折叠
+            tags = self.tree_events.item(item_id, 'tags')
+            if 'move_group' in tags:
+                _commit_inline()
+                # 切换展开状态
+                children = self.tree_events.get_children(item_id)
+                if children:
+                    current_open = self.tree_events.item(item_id, 'open')
+                    self.tree_events.item(item_id, open=not current_open)
+                return
+            col_num = int(col.replace('#', ''))
+            col_name = cols[col_num - 1]  # 映射到列名
+            if col_name in ('delay', 'hold'):
+                _start_inline_edit(item_id, col_name)
+            else:
+                _commit_inline()
 
         self.tree_events.bind('<Button-1>', _on_tree_click)
 
-        # 鼠标悬停效果：编辑列高亮
-        self._hover_item = None
-        def _on_motion(event):
-            item = self.tree_events.identify_row(event.y)
-            col = self.tree_events.identify_column(event.x)
-            # 移除之前的悬停效果
-            if self._hover_item and self._hover_item != item:
-                try:
-                    vals = self.tree_events.item(self._hover_item, 'values')
-                    self.tree_events.item(self._hover_item, tags=('edit_btn',))
-                except tk.TclError:
-                    pass
-            # 应用悬停效果
-            if item and col == '#7':
-                self.tree_events.item(item, tags=('edit_btn_active',))
-                self._hover_item = item
-                self.tree_events.config(cursor='hand2')
-            else:
-                self._hover_item = None
-                self.tree_events.config(cursor='')
-        self.tree_events.bind('<Motion>', _on_motion)
+        # 双击展开/折叠移动组
+        def _on_tree_dblclick(event):
+            item_id = self.tree_events.identify_row(event.y)
+            if not item_id:
+                return
+            tags = self.tree_events.item(item_id, 'tags')
+            if 'move_group' in tags:
+                children = self.tree_events.get_children(item_id)
+                if children:
+                    current_open = self.tree_events.item(item_id, 'open')
+                    self.tree_events.item(item_id, open=not current_open)
+
+        self.tree_events.bind('<Double-Button-1>', _on_tree_dblclick)
 
         self._current_events = []   # 当前编辑中的事件列表
+        self._insert_counter = 0    # 插入操作计数器
 
         # ---- 复现与保存 ----
         lf3 = ttk.LabelFrame(parent, text="复现与保存", padding=10)
@@ -2587,10 +2733,24 @@ class AutoClickerApp:
         ttk.Label(f2, text="容错范围:", width=10,
                   anchor='e').pack(side='left')
         self.var_play_radius = tk.IntVar(value=0)
-        ttk.Spinbox(f2, from_=0, to=500, textvariable=self.var_play_radius,
-                     width=10).pack(side='left')
-        ttk.Label(f2, text="像素 (0=精确点击)",
-                  foreground='gray').pack(side='left', padx=6)
+        self.spb_play_radius = ttk.Spinbox(f2, from_=0, to=30, textvariable=self.var_play_radius,
+                     width=5, command=lambda: self._on_radius_change(
+                         self.var_play_radius, self.canvas_play_radius))
+        self.spb_play_radius.pack(side='left')
+        self.scale_play_radius = ttk.Scale(f2, from_=0, to=30, variable=self.var_play_radius,
+                                            orient='horizontal', length=120,
+                                            command=lambda v: self._on_radius_change(
+                                                self.var_play_radius, self.canvas_play_radius))
+        self.scale_play_radius.pack(side='left', padx=4)
+        ttk.Label(f2, text="(0~30)",
+                  foreground='gray').pack(side='left')
+        # 圆圈预览
+        self.canvas_play_radius = tk.Canvas(f2, width=64, height=64,
+                                             bg='white', highlightthickness=1,
+                                             highlightbackground='#CCCCCC')
+        self.canvas_play_radius.pack(side='right', padx=8)
+        self.canvas_play_radius.update_idletasks()
+        self._draw_radius_circle(self.canvas_play_radius, 0)
 
         # 按钮
         bf2 = ttk.Frame(lf3); bf2.pack(fill='x', pady=(6, 0))
@@ -2649,13 +2809,16 @@ class AutoClickerApp:
         sb.pack(side='right', fill='y')
 
         # 双击加载
-        self.tree_files.bind('<Double-1>', lambda e: self._load_and_play())
+        self.tree_files.bind('<Double-1>', lambda e: self._load_recording_only())
 
         # 操作按钮
         bf = ttk.Frame(parent)
         bf.pack(fill='x', pady=(8, 0))
         ttk.Button(bf, text="▶ 加载并复现",
                    command=self._load_and_play, width=14).pack(
+                       side='left', padx=4)
+        ttk.Button(bf, text="📋 查看步骤",
+                   command=self._load_recording_only, width=14).pack(
                        side='left', padx=4)
         ttk.Button(bf, text="✏️ 重命名",
                    command=self._rename_file, width=10).pack(
@@ -3278,6 +3441,38 @@ class AutoClickerApp:
             record_move=self.var_rec_move.get(),
         )
 
+    def _draw_radius_circle(self, canvas, radius):
+        """在 Canvas 上绘制容错范围圆圈"""
+        canvas.delete('all')
+        # 优先使用 winfo_width，若为 1（未渲染）则用 cget 获取配置宽度
+        w = canvas.winfo_width()
+        h = canvas.winfo_height()
+        if w <= 1:
+            w = int(canvas.cget('width'))
+        if h <= 1:
+            h = int(canvas.cget('height'))
+        size = min(w, h)
+        center = size // 2
+        max_r = size // 2 - 4  # 留边距
+        display_r = min(radius, max_r)
+        if display_r > 0:
+            canvas.create_oval(center - display_r, center - display_r,
+                               center + display_r, center + display_r,
+                               outline='#1976D2', width=2, fill='#E3F2FD')
+            canvas.create_text(center, center, text=f'{radius}px',
+                               font=('Consolas', 8), fill='#1976D2')
+        else:
+            canvas.create_text(center, center, text='0',
+                               font=('Consolas', 8), fill='gray')
+
+    def _on_radius_change(self, var, canvas):
+        """容错范围变化时更新圆圈预览"""
+        try:
+            radius = var.get()
+        except (tk.TclError, ValueError):
+            radius = 0
+        self._draw_radius_circle(canvas, radius)
+
     def _add_event_row(self, ev, delay=None):
         seq = len(self.tree_events.get_children()) + 1
         btn_cn = {'left': '左键', 'right': '右键',
@@ -3306,13 +3501,142 @@ class AutoClickerApp:
             type_str = '点击'
             pos_str = f"({ev['x']}, {ev['y']})"
             time_str = f"{ev['time']:.3f}"
-        delay_str = f"{delay:.3f}" if delay is not None else "-"
+        # 按住时长列：所有事件类型都显示实际值
+        hold = ev.get('hold_duration', 0)
+        hold_str = f"{hold:.3f}" if hold > 0 else '0.000'
+        # 延迟列：从事件数据计算与上一个事件的时间差
+        if delay is not None:
+            delay_str = f"{delay:.3f}" if delay > 0 else '0.000'
+        else:
+            # 自动计算：当前事件时间 - 上一个事件时间
+            children = self.tree_events.get_children()
+            if children:
+                prev_vals = self.tree_events.item(children[-1], 'values')
+                prev_time_str = str(prev_vals[4]).split()[0]  # 去掉可能的 [按住...] 后缀
+                try:
+                    prev_time = float(prev_time_str)
+                    calc_delay = round(ev['time'] - prev_time, 3)
+                    delay_str = f"{calc_delay:.3f}" if calc_delay > 0 else '0.000'
+                except (ValueError, IndexError):
+                    delay_str = '0.000'
+            else:
+                delay_str = '0.000'
+        # 事件样式标记
+        tag = self._ev_type_tags.get(ev_type, 'click_row')
         self.tree_events.insert('', 'end', values=(
-            seq, type_str, pos_str, btn_cn, time_str, delay_str, '✎ 编辑'
-        ), tags=('edit_btn',))
+            seq, type_str, pos_str, btn_cn, time_str, hold_str, delay_str
+        ), tags=(tag,))
         children = self.tree_events.get_children()
         if children:
             self.tree_events.see(children[-1])
+
+    def _toggle_move_visibility(self):
+        """切换移动事件的显示/隐藏"""
+        self._refresh_event_list()
+
+    def _refresh_event_list(self):
+        """根据当前 _current_events 和 show_moves 设置刷新事件列表"""
+        show = self.var_show_moves.get()
+        for item in self.tree_events.get_children():
+            self.tree_events.delete(item)
+        if not hasattr(self, '_current_events') or not self._current_events:
+            return
+
+        # 先构建行数据列表
+        rows = []  # (seq_display, ev, ev_type, type_str, pos_str, btn_cn, time_str, hold_str, delay_str, is_insert, insert_num)
+        orig_seq = 0  # 原始事件计数器（跳过插入事件）
+        for i, ev in enumerate(self._current_events, 1):
+            is_insert = ev.get('_is_insert', False)
+            if is_insert:
+                seq_display = f"插入{ev.get('_insert_num', '?')}"
+            else:
+                orig_seq += 1
+                seq_display = str(orig_seq)
+            ev_type = ev.get('type', 'click')
+            btn_cn = {'left': '左键', 'right': '右键',
+                      'middle': '中键'}.get(ev.get('button', 'left'), '左键')
+            if ev_type == 'drag':
+                type_str = '拖动'
+                pos_str = f"({ev['x0']}, {ev['y0']}) → ({ev['x1']}, {ev['y1']})"
+                time_str = f"{ev['time']:.3f} ({ev.get('duration', 0):.3f}s)"
+            elif ev_type == 'key':
+                type_str = '按键'
+                key_display = ev.get('key', '')
+                mods = ev.get('mods', [])
+                if mods:
+                    mod_short = [m.replace('Key.', '') for m in mods]
+                    key_display = '+'.join(mod_short + [key_display])
+                pos_str = key_display
+                time_str = f"{ev['time']:.3f}"
+                btn_cn = '-'
+            elif ev_type == 'move':
+                type_str = '移动'
+                pos_str = f"({ev['x']}, {ev['y']})"
+                time_str = f"{ev['time']:.3f}"
+                btn_cn = '-'
+            else:
+                type_str = '点击'
+                pos_str = f"({ev['x']}, {ev['y']})"
+                time_str = f"{ev['time']:.3f}"
+            hold = ev.get('hold_duration', 0)
+            hold_str = f"{hold:.3f}" if hold > 0 else '0.000'
+            # 计算延迟
+            if i > 1:
+                prev_ev = self._current_events[i - 2]
+                calc_delay = round(ev['time'] - prev_ev['time'], 3)
+                delay_str = f"{calc_delay:.3f}" if calc_delay > 0 else '0.000'
+            else:
+                delay_str = '0.000'
+            rows.append((seq_display, ev, ev_type, type_str, pos_str, btn_cn, time_str, hold_str, delay_str, is_insert, ev.get('_insert_num', 0)))
+
+        # 分组：将连续的 move 事件合并
+        i = 0
+        while i < len(rows):
+            row = rows[i]
+            ev_type = row[2]
+            if ev_type == 'move' and not show:
+                # 跳过移动事件（不显示）
+                i += 1
+                continue
+            if ev_type == 'move':
+                # 收集连续的 move 事件
+                move_start = i
+                while i < len(rows) and rows[i][2] == 'move':
+                    i += 1
+                move_end = i  # exclusive
+                # 创建折叠组
+                first_ev = rows[move_start][1]
+                last_ev = rows[move_end - 1][1]
+                seq_start = rows[move_start][0]
+                seq_end = rows[move_end - 1][0]
+                group_label = f"{seq_start}-{seq_end}"
+                pos_range = f"({first_ev['x']}, {first_ev['y']}) → ({last_ev['x']}, {last_ev['y']})"
+                move_count = move_end - move_start
+                time_range = f"{first_ev['time']:.3f}~{last_ev['time']:.3f}"
+                hold_str = '0.000'
+                delay_str = '0.000'
+                # 插入父行（折叠的移动组）
+                parent_id = self.tree_events.insert('', 'end', values=(
+                    group_label, f'移动×{move_count}', pos_range, '-',
+                    time_range, hold_str, delay_str
+                ), tags=('move_group',), open=False)
+                # 插入子行（各个移动事件）
+                for j in range(move_start, move_end):
+                    r = rows[j]
+                    child_tag = ('inserted_row',) if r[9] else ('move_child',)
+                    self.tree_events.insert(parent_id, 'end', values=(
+                        r[0], r[3], r[4], r[6], r[7], r[8]
+                    ), tags=child_tag)
+            else:
+                # 非移动事件：直接插入
+                if row[9]:  # is_insert
+                    tag = 'inserted_row'
+                else:
+                    tag = self._ev_type_tags.get(row[2], 'click_row')
+                self.tree_events.insert('', 'end', values=(
+                    row[0], row[3], row[4], row[5], row[6], row[7], row[8]
+                ), tags=(tag,))
+                i += 1
 
     def _remove_last_event_row(self):
         """移除录制列表中最后一个事件行（用于将 click 替换为 drag 时）"""
@@ -3330,8 +3654,103 @@ class AutoClickerApp:
         self.sv_rec_status.set(f"已录制 {count} 个事件 ({rec_w}×{rec_h})")
         self.sv_status.set(f"✅ 录制完成，共 {count} 个事件")
         self.var_save_name.set(f"录制_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        # 将录制结果同步到可编辑的事件列表
+        if getattr(self, '_insert_mode', False):
+            # 插入模式：将新事件插入到标记位置之后
+            self._insert_mode = False
+            new_events = list(self.recorder.events)
+            if new_events and hasattr(self, '_insert_idx'):
+                insert_at = self._insert_idx - 1  # seq 号是 1-based，转为 0-based
+                # 标记插入事件
+                self._insert_counter += 1
+                for ev in new_events:
+                    ev['_is_insert'] = True
+                    ev['_insert_num'] = self._insert_counter
+                self._current_events[insert_at:insert_at] = new_events
+                self._refresh_event_list()
+                # 高亮插入的事件范围
+                children = self.tree_events.get_children()
+                if insert_at < len(children):
+                    inserted_items = children[insert_at:insert_at + len(new_events)]
+                    for item in inserted_items:
+                        self.tree_events.selection_add(item)
+                self.sv_status.set(f"✅ 已在位置 {self._insert_idx} 后插入 {len(new_events)} 个事件")
+                self.btn_insert_rec.config(state='normal')
+                return
+        # 正常录制完成：同步到可编辑事件列表
         self._current_events = list(self.recorder.events)
+        self._refresh_event_list()
+        if self._current_events:
+            self.btn_insert_rec.config(state='normal')
+
+    def _start_insert_rec(self):
+        """在选中的事件之后插入新录制的操作"""
+        if not self._current_events:
+            messagebox.showinfo("提示", "没有已加载的事件，请先录制或加载一个操作")
+            return
+        if self.recorder.recording or self.recorder.playing:
+            messagebox.showinfo("提示", "正在录制或复现中，请先停止")
+            return
+        # 获取选中的位置
+        sel = self.tree_events.selection()
+        if sel:
+            # 找到选中行在 _current_events 中的索引
+            vals = list(self.tree_events.item(sel[0], 'values'))
+            try:
+                self._insert_idx = int(vals[0])  # 1-based seq 号
+            except (ValueError, IndexError):
+                self._insert_idx = len(self._current_events)
+        else:
+            # 没有选中则追加到末尾
+            self._insert_idx = len(self._current_events)
+        # 标记插入位置
+        self._mark_insert_position(self._insert_idx)
+        self._insert_mode = True
+        # 开始录制
+        self.btn_rec_start.config(state='disabled')
+        self.btn_rec_stop.config(state='normal')
+        self.btn_insert_rec.config(state='disabled')
+        self.sv_rec_status.set("插入录制中...")
+        self.sv_status.set(f"🔄 在位置 {self._insert_idx + 1} 之后插入录制中...")
+
+        def on_event(action, ev):
+            if action == 'add':
+                self.root.after(0, lambda: self._add_event_row(ev))
+            elif action == 'remove_last':
+                self.root.after(0, self._remove_last_event_row)
+
+        self.recorder.start_recording(
+            on_event,
+            record_mouse=self.var_rec_mouse.get(),
+            record_key=self.var_rec_key.get(),
+            record_drag=self.var_rec_drag.get(),
+            record_move=self.var_rec_move.get(),
+        )
+
+    def _mark_insert_position(self, idx_1based):
+        """在事件列表中标记插入位置（黄色高亮行）"""
+        # 清除旧标记
+        for item in self.tree_events.get_children():
+            tags = self.tree_events.item(item, 'tags')
+            if 'insert_marker' in tags:
+                self.tree_events.item(item, tags=())
+        # 标记目标位置
+        children = self.tree_events.get_children()
+        if idx_1based <= len(children) and idx_1based > 0:
+            target = children[idx_1based - 1]
+            # 获取当前标签并追加 insert_marker
+            cur_tags = list(self.tree_events.item(target, 'tags'))
+            if 'insert_marker' not in cur_tags:
+                cur_tags.append('insert_marker')
+            self.tree_events.item(target, tags=tuple(cur_tags))
+            self.tree_events.see(target)
+        elif idx_1based == len(children) and children:
+            # 追加到末尾时，标记最后一行
+            target = children[-1]
+            cur_tags = list(self.tree_events.item(target, 'tags'))
+            if 'insert_marker' not in cur_tags:
+                cur_tags.append('insert_marker')
+            self.tree_events.item(target, tags=tuple(cur_tags))
+            self.tree_events.see(target)
 
     # ════════════════ 复现逻辑 ════════════════
 
@@ -3421,6 +3840,24 @@ class AutoClickerApp:
                 return rec
         return None
 
+    def _load_recording_only(self):
+        """加载已录制文件的步骤到操作录制事件列表（不自动复现）"""
+        rec = self._get_selected_rec()
+        if not rec:
+            return
+        if self.recorder.playing:
+            messagebox.showinfo("提示", "正在复现中，请先停止")
+            return
+        events = rec['events']
+        self._current_events = list(events)
+        self._refresh_event_list()
+        # 切换到操作录制标签
+        self.nb.select(1)
+        self.sv_rec_status.set(f"已加载: {rec['name']} ({len(events)} 步)")
+        self.sv_status.set(f"已加载录制: {rec['name']}")
+        if events:
+            self.btn_insert_rec.config(state='normal')
+
     def _load_and_play(self):
         rec = self._get_selected_rec()
         if not rec:
@@ -3454,12 +3891,20 @@ class AutoClickerApp:
                 type_str = '点击'
                 pos_str = f"({ev['x']}, {ev['y']})"
                 time_str = f"{ev['time']:.3f}"
-            # delay 列：相对于上一个事件的时间差
-            delay_str = "-"
+            hold = ev.get('hold_duration', 0)
+            hold_str = f"{hold:.3f}" if hold > 0 else '0.000'
+            # 计算与上一个事件的延迟
+            if i > 1:
+                prev_ev = events[i - 2]  # events 是 0-based, i 是 1-based
+                calc_delay = round(ev['time'] - prev_ev['time'], 3)
+                delay_str = f"{calc_delay:.3f}" if calc_delay > 0 else '0.000'
+            else:
+                delay_str = '0.000'
+            tag = self._ev_type_tags.get(ev_type, 'click_row')
             self.tree_events.insert('', 'end', values=(
                 i, type_str, pos_str, btn_cn,
-                time_str, delay_str, '✎ 编辑'
-            ), tags=('edit_btn',))
+                time_str, hold_str, delay_str
+            ), tags=(tag,))
         # 同步到可编辑事件列表
         self._current_events = list(events)
 
@@ -3760,6 +4205,16 @@ class AutoClickerApp:
 # ═══════════════════════════════════════════════════════════════
 if __name__ == '__main__':
     root = tk.Tk()
+    # 使用 clam 主题以支持 Treeview 标签背景色
+    style = ttk.Style(root)
+    style.theme_use('clam')
+    # 配置 Treeview 行高和基础样式
+    style.configure('Treeview',
+                     rowheight=24,
+                     font=('Microsoft YaHei UI', 9),
+                     background='white',
+                     fieldbackground='white')
+    style.map('Treeview', background=[('selected', '#0078D4')])
     app = AutoClickerApp(root)
     root.mainloop()
     sys.exit(0)
