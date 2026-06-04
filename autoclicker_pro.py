@@ -2418,7 +2418,14 @@ class AutoClickerApp:
         self.tree_events.column('button', width=55,  anchor='center')
         self.tree_events.column('time',   width=65,  anchor='center')
         self.tree_events.column('delay',  width=60,  anchor='center')
-        self.tree_events.column('action', width=60,  anchor='center')
+        self.tree_events.column('action', width=70,  anchor='center')
+
+        # 编辑按钮列样式：模拟可点击按钮外观
+        self.tree_events.tag_configure('edit_btn', foreground='#1565C0',
+                                        font=('Segoe UI', 9, 'underline'))
+        self.tree_events.tag_configure('edit_btn_active', foreground='#0D47A1',
+                                        background='#E3F2FD',
+                                        font=('Segoe UI', 9, 'bold underline'))
 
         sb = ttk.Scrollbar(lf2, orient='vertical',
                            command=self.tree_events.yview)
@@ -2451,27 +2458,63 @@ class AutoClickerApp:
                 dialog.resizable(False, False)
                 dialog.transient(self.root)
                 dialog.grab_set()
+                dialog.configure(bg='#F5F5F5')
                 cx = self.root.winfo_x() + self.root.winfo_width() // 2
                 cy = self.root.winfo_y() + self.root.winfo_height() // 2
-                dialog.geometry(f"320x260+{cx - 160}+{cy - 130}")
+                dialog.geometry(f"340x280+{cx - 170}+{cy - 140}")
 
-                tk.Label(dialog, text=f"类型: {ev_type.upper()}", font=("Microsoft YaHei", 10, "bold")).pack(pady=(16, 4))
+                # 类型标签（带图标和彩色背景）
+                type_icons = {'click': '🖱️', 'move': '↔️', 'drag': '↔️', 'key': '⌨️'}
+                type_colors = {'click': '#1976D2', 'move': '#388E3C', 'drag': '#F57C00', 'key': '#7B1FA2'}
+                icon = type_icons.get(ev_type, '❓')
+                color = type_colors.get(ev_type, '#666')
+                header = tk.Frame(dialog, bg=color, height=44)
+                header.pack(fill='x')
+                header.pack_propagate(False)
+                tk.Label(header, text=f"  {icon} 步骤 #{idx + 1}  —  {ev_type.upper()}",
+                         bg=color, fg='white', font=('Microsoft YaHei UI', 11, 'bold')).pack(side='left', padx=8)
+
+                # 信息区
+                info_frame = tk.Frame(dialog, bg='#F5F5F5')
+                info_frame.pack(fill='x', padx=20, pady=(12, 0))
                 if ev_type in ('click', 'move'):
-                    tk.Label(dialog, text=f"坐标: ({old_x}, {old_y})").pack()
+                    tk.Label(info_frame, text=f"坐标: ({old_x}, {old_y})",
+                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
                 elif ev_type == 'drag':
-                    tk.Label(dialog, text=f"拖动: ({ev['x0']}, {ev['y0']}) -> ({ev['x1']}, {ev['y1']})").pack()
+                    tk.Label(info_frame, text=f"拖动: ({ev['x0']}, {ev['y0']}) → ({ev['x1']}, {ev['y1']})",
+                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
                 elif ev_type == 'key':
-                    tk.Label(dialog, text=f"按键: {ev.get('key', '?')}").pack()
+                    tk.Label(info_frame, text=f"按键: {ev.get('key', '?')}",
+                             bg='#F5F5F5', font=('Consolas', 10)).pack(anchor='w')
 
-                tk.Label(dialog, text="额外延迟（秒）:").pack(pady=(12, 0))
+                # 延迟输入
+                delay_frame = tk.Frame(dialog, bg='#F5F5F5')
+                delay_frame.pack(fill='x', padx=20, pady=(10, 0))
+                tk.Label(delay_frame, text="额外延迟（秒）:", bg='#F5F5F5',
+                         font=('Microsoft YaHei UI', 9)).pack(anchor='w')
                 delay_var = tk.StringVar(value=str(old_delay))
-                tk.Entry(dialog, textvariable=delay_var, width=30).pack(pady=4)
+                delay_entry = tk.Entry(delay_frame, textvariable=delay_var, width=30,
+                                       font=('Consolas', 10), relief='solid', bd=1)
+                delay_entry.pack(fill='x', pady=(2, 0))
 
-                frm = tk.Frame(dialog)
-                frm.pack(pady=16)
-                tk.Button(frm, text="保存", command=lambda: self._apply_edit(item_id, idx, delay_var, dialog), width=10).pack(side='left', padx=6)
-                tk.Button(frm, text="删除", command=lambda: self._delete_event(idx, item_id, dialog), width=10, fg='red').pack(side='left', padx=6)
-                tk.Button(frm, text="取消", command=dialog.destroy, width=10).pack(side='left', padx=6)
+                # 按钮区
+                btn_frame = tk.Frame(dialog, bg='#F5F5F5')
+                btn_frame.pack(fill='x', padx=20, pady=(16, 16))
+                save_btn = tk.Button(btn_frame, text="✓ 保存",
+                    command=lambda: self._apply_edit(item_id, idx, delay_var, dialog),
+                    bg='#1976D2', fg='white', font=('Microsoft YaHei UI', 9, 'bold'),
+                    relief='flat', cursor='hand2', width=9, activebackground='#1565C0')
+                save_btn.pack(side='left', padx=(0, 6))
+                del_btn = tk.Button(btn_frame, text="✗ 删除",
+                    command=lambda: self._delete_event(idx, item_id, dialog),
+                    bg='#D32F2F', fg='white', font=('Microsoft YaHei UI', 9, 'bold'),
+                    relief='flat', cursor='hand2', width=9, activebackground='#B71C1C')
+                del_btn.pack(side='left', padx=6)
+                cancel_btn = tk.Button(btn_frame, text="取消",
+                    command=dialog.destroy,
+                    bg='#9E9E9E', fg='white', font=('Microsoft YaHei UI', 9),
+                    relief='flat', cursor='hand2', width=9, activebackground='#757575')
+                cancel_btn.pack(side='left', padx=(6, 0))
             elif col_idx == 5:  # 延迟列 — 弹出编辑
                 current_vals = self.tree_events.item(item_id, 'values')
                 old_delay = current_vals[5]
@@ -2491,6 +2534,28 @@ class AutoClickerApp:
                         messagebox.showwarning("输入错误", "请输入有效的数字")
 
         self.tree_events.bind('<Button-1>', _on_tree_click)
+
+        # 鼠标悬停效果：编辑列高亮
+        self._hover_item = None
+        def _on_motion(event):
+            item = self.tree_events.identify_row(event.y)
+            col = self.tree_events.identify_column(event.x)
+            # 移除之前的悬停效果
+            if self._hover_item and self._hover_item != item:
+                try:
+                    vals = self.tree_events.item(self._hover_item, 'values')
+                    self.tree_events.item(self._hover_item, tags=('edit_btn',))
+                except tk.TclError:
+                    pass
+            # 应用悬停效果
+            if item and col == '#7':
+                self.tree_events.item(item, tags=('edit_btn_active',))
+                self._hover_item = item
+                self.tree_events.config(cursor='hand2')
+            else:
+                self._hover_item = None
+                self.tree_events.config(cursor='')
+        self.tree_events.bind('<Motion>', _on_motion)
 
         self._current_events = []   # 当前编辑中的事件列表
 
@@ -3243,8 +3308,8 @@ class AutoClickerApp:
             time_str = f"{ev['time']:.3f}"
         delay_str = f"{delay:.3f}" if delay is not None else "-"
         self.tree_events.insert('', 'end', values=(
-            seq, type_str, pos_str, btn_cn, time_str, delay_str, '✏️'
-        ))
+            seq, type_str, pos_str, btn_cn, time_str, delay_str, '✎ 编辑'
+        ), tags=('edit_btn',))
         children = self.tree_events.get_children()
         if children:
             self.tree_events.see(children[-1])
@@ -3393,8 +3458,8 @@ class AutoClickerApp:
             delay_str = "-"
             self.tree_events.insert('', 'end', values=(
                 i, type_str, pos_str, btn_cn,
-                time_str, delay_str, '✏️'
-            ))
+                time_str, delay_str, '✎ 编辑'
+            ), tags=('edit_btn',))
         # 同步到可编辑事件列表
         self._current_events = list(events)
 
