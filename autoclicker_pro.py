@@ -1555,6 +1555,7 @@ class StepEditDialog(tk.Toplevel):
         show_combo = op == OP_COMBO_KEY
         show_scroll = op == OP_SCROLL
         show_drag = op == OP_DRAG
+        show_radius = op in [OP_CLICK, OP_DOUBLE_CLICK, OP_MIDDLE_CLICK]
         
         self.click_frame.pack_forget()
         self.btn_frame.pack_forget()
@@ -1562,12 +1563,15 @@ class StepEditDialog(tk.Toplevel):
         self.combo_frame.pack_forget()
         self.scroll_frame.pack_forget()
         self.drag_frame.pack_forget()
+        self.radius_frame.pack_forget()
         
         # 重新pack到延时之前（使用命名引用，避免依赖 winfo_children 顺序）
         if show_click:
             self.click_frame.pack(fill='x', pady=4, before=self.delay_frame)
         if show_btn:
             self.btn_frame.pack(fill='x', pady=4, before=self.delay_frame)
+        if show_radius:
+            self.radius_frame.pack(fill='x', pady=4, before=self.delay_frame)
         if show_key:
             self.key_frame.pack(fill='x', pady=4, before=self.delay_frame)
         if show_combo:
@@ -2038,6 +2042,18 @@ class FlowCanvas(tk.Canvas):
         """单击"""
         node_id = self._get_node_at(event.x, event.y)
         
+        # 连线模式：第二次点击完成连线
+        if self.drawing_connection:
+            if node_id and node_id != self.connection_start:
+                self._complete_connection(node_id)
+            else:
+                # 点击空白或自身，取消连线
+                self.drawing_connection = False
+                self.connection_start = None
+                self.app.sv_status.set("连线已取消")
+            self.redraw()
+            return
+        
         if node_id:
             if node_id not in self.selected_nodes:
                 self.selected_nodes = [node_id]
@@ -2051,6 +2067,7 @@ class FlowCanvas(tk.Canvas):
             self.box_start = (event.x, event.y)
             
         self.redraw()
+        self.app._sync_tree_selection()
         
     def _on_ctrl_click(self, event):
         """Ctrl+单击 - 多选"""
@@ -2061,6 +2078,7 @@ class FlowCanvas(tk.Canvas):
             else:
                 self.selected_nodes.append(node_id)
             self.redraw()
+            self.app._sync_tree_selection()
             
     def _on_drag(self, event):
         """拖拽"""
@@ -2106,6 +2124,7 @@ class FlowCanvas(tk.Canvas):
                     
             self.box_selecting = False
             self.redraw()
+            self.app._sync_tree_selection()
             
         self.dragging = False
         self.drag_node = None
@@ -2160,6 +2179,26 @@ class FlowCanvas(tk.Canvas):
         ttk.Button(dialog, text="确定", command=on_ok).pack(side='left', padx=20, pady=10)
         ttk.Button(dialog, text="取消", command=on_cancel).pack(side='left')
         
+    def _complete_connection(self, target_id: str):
+        """完成连线"""
+        from_step = self.project.get_step(self.connection_start)
+        if not from_step:
+            self.drawing_connection = False
+            self.connection_start = None
+            return
+            
+        if self.connection_type == 'match':
+            from_step.branch_match_next = target_id
+        else:
+            from_step.branch_nomatch_next = target_id
+            
+        from_step.branch_enabled = True
+        self.drawing_connection = False
+        self.connection_start = None
+        self.connection_type = None
+        self.app.sv_status.set(f"✅ 连线完成")
+        self.app._sync_list_from_canvas()
+        
     def _delete_step(self, step_id: str):
         """删除步骤"""
         if messagebox.askyesno("确认", "确定删除此步骤？"):
@@ -2187,6 +2226,9 @@ class FlowCanvas(tk.Canvas):
         """双击编辑"""
         node_id = self._get_node_at(event.x, event.y)
         if node_id:
+            # 重置拖拽状态，防止双击后残留
+            self.dragging = False
+            self.drag_node = None
             self._edit_step(node_id)
             
     def _on_delete(self, event):
@@ -3086,6 +3128,13 @@ class AutoClickerApp:
                 real_ids.append(sid)
             self.flow_canvas.selected_nodes = real_ids
             self.flow_canvas.redraw()
+            
+    def _sync_tree_selection(self):
+        """画布选择同步到列表"""
+        self.tree_flow.selection_remove(*self.tree_flow.get_children())
+        for sid in self.flow_canvas.selected_nodes:
+            if self.tree_flow.exists(sid):
+                self.tree_flow.selection_add(sid)
             
     def _on_list_right_click(self, event):
         """列表右键菜单"""
