@@ -1,9 +1,0 @@
-{
-  "start_stop": "F6",
-  "cancel": "Escape",
-  "start_stop_rec": "F7",
-  "start_stop_play": "F8",
-  "start_stop_flow": "F9",
-  "save_rec": "F10",
-  "emergency_stop": "F11"
-}
