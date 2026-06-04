@@ -30,6 +30,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Callable, Tuple
 
+# 单文件打包时 __file__ 在临时目录，用 EXE 所在目录代替
+_APP_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+
 # ═══════════════════════════════════════════════════════════════
 #  依赖自动安装
 # ═══════════════════════════════════════════════════════════════
@@ -674,7 +677,7 @@ class Recorder:
     """录制点击操作、播放、保存、管理录制文件"""
 
     def __init__(self, rec_dir=None):
-        self.rec_dir = Path(rec_dir) if rec_dir else Path(__file__).parent / "recordings"
+        self.rec_dir = Path(rec_dir) if rec_dir else _APP_DIR / "recordings"
         self.rec_dir.mkdir(parents=True, exist_ok=True)
 
         self._recording = False
@@ -2219,7 +2222,7 @@ class AutoClickerApp:
         self._clipboard_steps = []
 
         # 快捷键设置（持久化）
-        self.hotkey_file = Path(__file__).parent / 'hotkey_settings.json'
+        self.hotkey_file = _APP_DIR / 'hotkey_settings.json'
         self.hotkeys = self._load_hotkeys()
         self.sv_hotkey_hint = tk.StringVar(value="")
 
@@ -3120,7 +3123,7 @@ class AutoClickerApp:
                                       initialvalue=self.flow_project.name)
         if name:
             self.flow_project.name = name
-            path = Path(__file__).parent / "flows" / f"{name}.json"
+            path = _APP_DIR / "flows" / f"{name}.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             
             with open(path, 'w', encoding='utf-8') as f:
@@ -3130,7 +3133,7 @@ class AutoClickerApp:
             
     def _load_flow(self):
         """加载流程"""
-        flows_dir = Path(__file__).parent / "flows"
+        flows_dir = _APP_DIR / "flows"
         if not flows_dir.exists():
             messagebox.showinfo("提示", "没有已保存的流程")
             return
