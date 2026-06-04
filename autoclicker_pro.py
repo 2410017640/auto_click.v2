@@ -740,11 +740,22 @@ class Recorder:
 
             if pressed:
                 if record_drag:
+                    # 在按下时就记录点击事件（而非等待松开），确保时序准确
                     self._drag_state = {
                         'button': btn,
                         'x0': int(x), 'y0': int(y),
                         't0': now,
+                        '_emitted': False,
                     }
+                    # 立即发出 click 事件（基于 press 位置和时间）
+                    ev = {
+                        'type': 'click',
+                        'x': int(x), 'y': int(y),
+                        'button': btn,
+                        'time': now,
+                    }
+                    _emit(ev)
+                    self._drag_state['_emitted'] = True
                 else:
                     ev = {
                         'type': 'click',
@@ -760,6 +771,15 @@ class Recorder:
                     dx = abs(int(x) - ds['x0'])
                     dy = abs(int(y) - ds['y0'])
                     if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
+                        # 是拖动操作：替换之前发出的 click 为 drag
+                        if ds['_emitted'] and len(self._events) > 0:
+                            # 移除之前发出的 click 事件
+                            self._events.pop()
+                            if self._on_event:
+                                try:
+                                    self._on_event('remove_last', None)
+                                except Exception:
+                                    pass
                         ev = {
                             'type': 'drag',
                             'x0': ds['x0'], 'y0': ds['y0'],
@@ -767,14 +787,6 @@ class Recorder:
                             'button': ds['button'],
                             'time': ds['t0'],
                             'duration': round(now - ds['t0'], 3),
-                        }
-                        _emit(ev)
-                    else:
-                        ev = {
-                            'type': 'click',
-                            'x': ds['x0'], 'y': ds['y0'],
-                            'button': ds['button'],
-                            'time': ds['t0'],
                         }
                         _emit(ev)
             return True
@@ -882,20 +894,40 @@ class Recorder:
 
         def _run():
             err = None
+            # 临时禁用 pyautogui.PAUSE，避免每次调用累积 5ms 延迟
+            saved_pause = pyautogui.PAUSE
+            pyautogui.PAUSE = 0
             try:
                 while self._playing:
+                    # 使用绝对时间基准来补偿 sleep 精度误差
+                    t_start = time.monotonic()
                     prev = 0
                     for i, ev in enumerate(ev_list):
                         if not self._playing:
                             return
-                        delay = (ev['time'] - prev) / speed
-                        # 加上用户手动编辑的额外延迟
+                        # 计算目标延迟
+                        target_delay = (ev['time'] - prev) / speed
                         extra_delay = ev.get('_extra_delay', 0)
                         if extra_delay > 0:
-                            delay += extra_delay / speed
-                        if delay > 0 and i > 0:
-                            time.sleep(delay)
+                            target_delay += extra_delay / speed
                         prev = ev['time']
+
+                        # 精确等待：先 sleep 整数毫秒，剩余用 busy-wait 补偿
+                        if target_delay > 0 and i > 0:
+                            elapsed = time.monotonic() - t_start
+                            # 基于录制时间戳计算期望的绝对等待时间
+                            expected = ev['time'] / speed
+                            wait = expected - elapsed
+                            if extra_delay > 0:
+                                wait += extra_delay / speed
+                            if wait > 0.001:
+                                time.sleep(wait - 0.001)
+                            # busy-wait 精确补偿最后 1ms
+                            while (time.monotonic() - t_start) < expected + (extra_delay / speed if extra_delay > 0 else 0):
+                                if not self._playing:
+                                    return
+                                pass
+
                         if not self._playing:
                             return
                         if ev['type'] == 'click':
@@ -940,7 +972,6 @@ class Recorder:
                                 try:
                                     mods = ev.get('mods', [])
                                     if mods:
-                                        # 组合键：先转修饰键名，再转目标键名
                                         mod_keys = [_resolve_key(m) for m in mods if _resolve_key(m)]
                                         resolved = _resolve_key(key_str)
                                         if mod_keys and resolved:
@@ -963,6 +994,7 @@ class Recorder:
             except Exception as e:
                 err = str(e)
             finally:
+                pyautogui.PAUSE = saved_pause
                 self._playing = False
                 if on_done:
                     try:
@@ -3170,6 +3202,8 @@ class AutoClickerApp:
         def on_event(action, ev):
             if action == 'add':
                 self.root.after(0, lambda: self._add_event_row(ev))
+            elif action == 'remove_last':
+                self.root.after(0, self._remove_last_event_row)
 
         self.recorder.start_recording(
             on_event,
@@ -3214,6 +3248,12 @@ class AutoClickerApp:
         children = self.tree_events.get_children()
         if children:
             self.tree_events.see(children[-1])
+
+    def _remove_last_event_row(self):
+        """移除录制列表中最后一个事件行（用于将 click 替换为 drag 时）"""
+        children = self.tree_events.get_children()
+        if children:
+            self.tree_events.delete(children[-1])
 
     def _stop_rec(self):
         self.recorder.stop_recording()
