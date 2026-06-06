@@ -13,6 +13,8 @@
 安全退出：鼠标移至屏幕左上角
 """
 
+import sys
+
 # Windows 高DPI感知：必须在 tkinter/pyautogui 导入之前设置
 if sys.platform == 'win32':
     try:
@@ -31,7 +33,6 @@ import threading
 import time
 import json
 import os
-import sys
 import subprocess
 import uuid
 import copy
