@@ -13,6 +13,18 @@
 安全退出：鼠标移至屏幕左上角
 """
 
+# Windows 高DPI感知：必须在 tkinter/pyautogui 导入之前设置
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        # Per-Monitor DPI Aware (Win8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, colorchooser
 import threading
@@ -29,19 +41,6 @@ import base64
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Callable, Tuple
-
-# Windows 高DPI感知：确保 pyautogui/pynput 坐标与物理像素一致
-# 必须在 tkinter 初始化之前设置
-if sys.platform == 'win32':
-    try:
-        import ctypes
-        # Per-Monitor DPI Aware (Win8.1+)
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
 
 # 单文件打包时 __file__ 在临时目录，用 EXE 所在目录代替
 _APP_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
@@ -1821,7 +1820,7 @@ class StepEditDialog(tk.Toplevel):
         self._capture_rect = None
         
         def on_mouse_down(event):
-            self._capture_start = (event.x, event.y)
+            self._capture_start = (event.x_root, event.y_root)
             
         def on_mouse_move(event):
             if self._capture_start:
@@ -1829,14 +1828,14 @@ class StepEditDialog(tk.Toplevel):
                     canvas.delete(self._capture_rect)
                 self._capture_rect = canvas.create_rectangle(
                     self._capture_start[0], self._capture_start[1],
-                    event.x, event.y,
+                    event.x_root, event.y_root,
                     outline='red', width=2, fill=''
                 )
                 
         def on_mouse_up(event):
             if self._capture_start:
                 x1, y1 = self._capture_start
-                x2, y2 = event.x, event.y
+                x2, y2 = event.x_root, event.y_root
                 left, right = min(x1, x2), max(x1, x2)
                 top, bottom = min(y1, y2), max(y1, y2)
                 
