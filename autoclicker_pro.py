@@ -46,6 +46,72 @@ from typing import Optional, Dict, List, Any, Callable, Tuple
 _APP_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 
 # ═══════════════════════════════════════════════════════════════
+#  多显示器工具
+# ═══════════════════════════════════════════════════════════════
+def _get_virtual_screen_rect():
+    """获取所有显示器组成的虚拟屏幕边界 (left, top, width, height)
+    坐标系原点在主显示器左上角，副显示器可能有负坐标。"""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+            left   = ctypes.windll.user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+            top    = ctypes.windll.user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+            width  = ctypes.windll.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+            height = ctypes.windll.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+            return (left, top, width, height)
+        except Exception:
+            pass
+    # fallback: 仅主显示器
+    return (0, 0, _get_primary_screen_size()[0], _get_primary_screen_size()[1])
+
+def _get_primary_screen_size():
+    """获取主显示器分辨率 (width, height)"""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            w = ctypes.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN
+            h = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+            return (w, h)
+        except Exception:
+            pass
+    import tkinter as _tk
+    _r = _tk.Tk()
+    _r.withdraw()
+    w, h = _r.winfo_screenwidth(), _r.winfo_screenheight()
+    _r.destroy()
+    return (w, h)
+
+def _screenshot_virtual_screen():
+    """截取整个虚拟屏幕（所有显示器），返回 (PIL.Image, (left, top))"""
+    from PIL import ImageGrab
+    rect = _get_virtual_screen_rect()
+    left, top, width, height = rect
+    img = ImageGrab.grab(bbox=(left, top, left + width, top + height))
+    return img, (left, top)
+
+def _create_fullscreen_window(parent, alpha=0.01):
+    """创建覆盖所有显示器的全屏透明窗口，返回 (Toplevel, canvas)"""
+    import tkinter as _tk
+    rect = _get_virtual_screen_rect()
+    left, top, width, height = rect
+    
+    win = _tk.Toplevel(parent)
+    # 无边框 + 位置覆盖整个虚拟屏幕
+    win.overrideredirect(True)
+    win.geometry(f"{width}x{height}+{left}+{top}")
+    win.attributes('-topmost', True)
+    win.attributes('-alpha', alpha)
+    win.configure(bg='black')
+    
+    canvas = _tk.Canvas(win, bg='black', highlightthickness=0, 
+                        width=width, height=height)
+    canvas.pack(fill='both', expand=True)
+    
+    return win, canvas, (left, top)
+
+# ═══════════════════════════════════════════════════════════════
 #  依赖自动安装
 # ═══════════════════════════════════════════════════════════════
 def _ensure_deps():
@@ -576,13 +642,14 @@ class FlowEngine:
             if not self._running:
                 return None
                 
-            # 截屏
+            # 截屏（支持多显示器）
             if step.match_region:
+                # 有指定区域：直接截取该区域
                 screenshot = pyautogui.screenshot(region=step.match_region)
+                offset_x, offset_y = 0, 0
             else:
-                # fullscreen 和 single_screen 当前都截全屏
-                # TODO: 多显示器场景下区分主显示器截图
-                screenshot = pyautogui.screenshot()
+                # 截取整个虚拟屏幕（所有显示器）
+                screenshot, (offset_x, offset_y) = _screenshot_virtual_screen()
                 
             # 转为numpy
             screen_np = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
@@ -592,10 +659,10 @@ class FlowEngine:
             min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
             
             if max_val >= step.match_threshold:
-                # 返回中心点
+                # 返回中心点（转换为屏幕坐标）
                 h, w = step.match_image_data.shape[:2]
-                center_x = max_loc[0] + w // 2
-                center_y = max_loc[1] + h // 2
+                center_x = max_loc[0] + w // 2 + offset_x
+                center_y = max_loc[1] + h // 2 + offset_y
                 if step.match_region:
                     center_x += step.match_region[0]
                     center_y += step.match_region[1]
@@ -724,7 +791,10 @@ class Recorder:
         self._events    = []
         self._t0        = time.time()
         self._on_event  = on_event
-        self._rec_w, self._rec_h = pyautogui.size().width, pyautogui.size().height
+        # 记录虚拟屏幕尺寸（支持多显示器坐标）
+        vrect = _get_virtual_screen_rect()
+        self._rec_vleft, self._rec_vtop = vrect[0], vrect[1]
+        self._rec_w, self._rec_h = vrect[2], vrect[3]
 
         self._drag_state = None
         DRAG_THRESHOLD = 5
@@ -938,8 +1008,9 @@ class Recorder:
             return
         self._playing = True
 
-        # 分辨率自适应缩放
-        cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
+        # 分辨率自适应缩放（使用虚拟屏幕尺寸，支持多显示器）
+        cur_vrect = _get_virtual_screen_rect()
+        cur_w, cur_h = cur_vrect[2], cur_vrect[3]
         if rec_resolution:
             rec_w, rec_h = rec_resolution
         else:
@@ -1084,7 +1155,8 @@ class Recorder:
         path = self.rec_dir / f"{name}.json"
         rec_w, rec_h = getattr(self, '_rec_w', 0), getattr(self, '_rec_h', 0)
         if rec_w == 0:
-            rec_w, rec_h = pyautogui.size().width, pyautogui.size().height
+            vrect = _get_virtual_screen_rect()
+            rec_w, rec_h = vrect[2], vrect[3]
         data = {
             'name':        name,
             'created':     datetime.now().isoformat(),
@@ -1680,17 +1752,15 @@ class StepEditDialog(tk.Toplevel):
         self.iconify()
         time.sleep(0.3)
         
-        # 创建全屏透明窗口
-        pick_win = tk.Toplevel(self.master)
-        pick_win.attributes('-fullscreen', True)
-        pick_win.attributes('-topmost', True)
-        pick_win.attributes('-alpha', 0.01)  # 几乎透明
-        pick_win.configure(bg='black', cursor='cross')
+        # 创建覆盖所有显示器的全屏透明窗口
+        pick_win, canvas, (ox, oy) = _create_fullscreen_window(self.master, alpha=0.01)
+        pick_win.configure(cursor='cross')
         
-        # 提示标签
+        # 提示标签（显示在主显示器顶部中央）
+        pri_w, pri_h = _get_primary_screen_size()
         label = tk.Label(pick_win, text="点击屏幕任意位置获取坐标 (Esc取消)", 
                         fg='white', bg='black', font=('Arial', 14))
-        label.place(relx=0.5, rely=0.05, anchor='center')
+        label.place(x=pri_w//2, y=30, anchor='center')
         
         def on_click(event):
             x, y = event.x_root, event.y_root
@@ -1723,15 +1793,13 @@ class StepEditDialog(tk.Toplevel):
         self.iconify()
         time.sleep(0.3)
         
-        pick_win = tk.Toplevel(self.master)
-        pick_win.attributes('-fullscreen', True)
-        pick_win.attributes('-topmost', True)
-        pick_win.attributes('-alpha', 0.01)
-        pick_win.configure(bg='black', cursor='cross')
+        pick_win, canvas, (ox, oy) = _create_fullscreen_window(self.master, alpha=0.01)
+        pick_win.configure(cursor='cross')
         
+        pri_w, pri_h = _get_primary_screen_size()
         label = tk.Label(pick_win, text="点击选择拖动起点 (Esc取消)", 
                         fg='white', bg='black', font=('Arial', 14))
-        label.place(relx=0.5, rely=0.05, anchor='center')
+        label.place(x=pri_w//2, y=30, anchor='center')
         
         def on_click(event):
             x, y = event.x_root, event.y_root
@@ -1764,15 +1832,13 @@ class StepEditDialog(tk.Toplevel):
         self.iconify()
         time.sleep(0.3)
         
-        pick_win = tk.Toplevel(self.master)
-        pick_win.attributes('-fullscreen', True)
-        pick_win.attributes('-topmost', True)
-        pick_win.attributes('-alpha', 0.01)
-        pick_win.configure(bg='black', cursor='cross')
+        pick_win, canvas, (ox, oy) = _create_fullscreen_window(self.master, alpha=0.01)
+        pick_win.configure(cursor='cross')
         
+        pri_w, pri_h = _get_primary_screen_size()
         label = tk.Label(pick_win, text="点击选择拖动终点 (Esc取消)", 
                         fg='white', bg='black', font=('Arial', 14))
-        label.place(relx=0.5, rely=0.05, anchor='center')
+        label.place(x=pri_w//2, y=30, anchor='center')
         
         def on_click(event):
             x, y = event.x_root, event.y_root
@@ -1797,38 +1863,35 @@ class StepEditDialog(tk.Toplevel):
         self.iconify()
         time.sleep(0.3)
         
-        # 创建全屏透明窗口
-        capture_win = tk.Toplevel(self.master)
-        capture_win.attributes('-fullscreen', True)
-        capture_win.attributes('-topmost', True)
-        capture_win.attributes('-alpha', 0.3)
-        capture_win.configure(bg='black', cursor='cross')
+        # 创建覆盖所有显示器的全屏半透明窗口
+        capture_win, canvas, (ox, oy) = _create_fullscreen_window(self.master, alpha=0.3)
+        capture_win.configure(cursor='cross')
         
-        # 获取屏幕尺寸
-        screen_width = capture_win.winfo_screenwidth()
-        screen_height = capture_win.winfo_screenheight()
-        
-        # 画布
-        canvas = tk.Canvas(capture_win, bg='black', highlightthickness=0)
-        canvas.pack(fill='both', expand=True)
+        pri_w, pri_h = _get_primary_screen_size()
         
         # 提示文字
-        canvas.create_text(screen_width//2, 30, text="按住鼠标左键框选区域，松开完成截图 (Esc取消)",
+        canvas.create_text(pri_w//2, 30, text="按住鼠标左键框选区域，松开完成截图 (Esc取消)",
                           fill='white', font=('Arial', 14))
         
         self._capture_start = None
         self._capture_rect = None
         
         def on_mouse_down(event):
+            # 转换为画布坐标（canvas 原点在虚拟屏幕左上角）
+            cx = event.x_root - ox
+            cy = event.y_root - oy
             self._capture_start = (event.x_root, event.y_root)
+            self._capture_canvas_start = (cx, cy)
             
         def on_mouse_move(event):
             if self._capture_start:
                 if self._capture_rect:
                     canvas.delete(self._capture_rect)
+                cx = event.x_root - ox
+                cy = event.y_root - oy
+                sx, sy = self._capture_canvas_start
                 self._capture_rect = canvas.create_rectangle(
-                    self._capture_start[0], self._capture_start[1],
-                    event.x_root, event.y_root,
+                    sx, sy, cx, cy,
                     outline='red', width=2, fill=''
                 )
                 
@@ -1840,7 +1903,6 @@ class StepEditDialog(tk.Toplevel):
                 top, bottom = min(y1, y2), max(y1, y2)
                 
                 if right - left > 5 and bottom - top > 5:
-                    # 截图
                     capture_win.destroy()
                     self._do_capture(left, top, right - left, bottom - top)
                 else:
@@ -2561,7 +2623,8 @@ class AutoClickerApp:
                                           state='disabled')
         self.btn_insert_rec.pack(side='left', padx=4)
         self.sv_rec_status = tk.StringVar(value="未录制")
-        cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
+        cur_vrect = _get_virtual_screen_rect()
+        cur_w, cur_h = cur_vrect[2], cur_vrect[3]
         ttk.Label(bf, textvariable=self.sv_rec_status,
                   foreground='gray').pack(side='right')
 
@@ -3544,7 +3607,8 @@ class AutoClickerApp:
     def _start_rec(self):
         self.btn_rec_start.config(state='disabled')
         self.btn_rec_stop.config(state='normal')
-        cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
+        cur_vrect = _get_virtual_screen_rect()
+        cur_w, cur_h = cur_vrect[2], cur_vrect[3]
         self.sv_rec_status.set(f"🔴 录制中… ({cur_w}×{cur_h})")
         for item in self.tree_events.get_children():
             self.tree_events.delete(item)
@@ -3933,7 +3997,8 @@ class AutoClickerApp:
         for item in self.tree_files.get_children():
             self.tree_files.delete(item)
         self._recordings_cache = self.recorder.list_all()
-        cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
+        cur_vrect = _get_virtual_screen_rect()
+        cur_w, cur_h = cur_vrect[2], cur_vrect[3]
         for rec in self._recordings_cache:
             created = (rec['created'][:19].replace('T', ' ')
                        if rec['created'] else '-')
