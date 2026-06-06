@@ -1001,7 +1001,7 @@ class Recorder:
 
     def play(self, events=None, speed=1.0, loop=False,
              on_progress=None, on_done=None, rec_resolution=None,
-             radius=0):
+             radius=0, rand_delay=False, rand_delay_min=0.5, rand_delay_max=2.0):
         if self._playing:
             return
         ev_list = events if events is not None else self._events
@@ -1034,27 +1034,35 @@ class Recorder:
                         if not self._playing:
                             return
                         # 计算目标延迟
-                        target_delay = (ev['time'] - prev) / speed
-                        extra_delay = ev.get('_extra_delay', 0)
-                        if extra_delay > 0:
-                            target_delay += extra_delay / speed
+                        if rand_delay and i > 0:
+                            # 随机延迟模式：使用随机值替代录制延迟
+                            import random as _rnd
+                            target_delay = _rnd.uniform(rand_delay_min, rand_delay_max)
+                        else:
+                            target_delay = (ev['time'] - prev) / speed
+                            extra_delay = ev.get('_extra_delay', 0)
+                            if extra_delay > 0:
+                                target_delay += extra_delay / speed
                         prev = ev['time']
 
-                        # 精确等待：先 sleep 整数毫秒，剩余用 busy-wait 补偿
+                        # 精确等待
                         if target_delay > 0 and i > 0:
-                            elapsed = time.monotonic() - t_start
-                            # 基于录制时间戳计算期望的绝对等待时间
-                            expected = ev['time'] / speed
-                            wait = expected - elapsed
-                            if extra_delay > 0:
-                                wait += extra_delay / speed
-                            if wait > 0.001:
-                                time.sleep(wait - 0.001)
-                            # busy-wait 精确补偿最后 1ms
-                            while (time.monotonic() - t_start) < expected + (extra_delay / speed if extra_delay > 0 else 0):
-                                if not self._playing:
-                                    return
-                                pass
+                            if rand_delay:
+                                # 随机延迟：直接 sleep
+                                time.sleep(target_delay)
+                            else:
+                                # 录制延迟：精确等待
+                                elapsed = time.monotonic() - t_start
+                                expected = ev['time'] / speed
+                                wait = expected - elapsed
+                                if extra_delay > 0:
+                                    wait += extra_delay / speed
+                                if wait > 0.001:
+                                    time.sleep(wait - 0.001)
+                                while (time.monotonic() - t_start) < expected + (extra_delay / speed if extra_delay > 0 else 0):
+                                    if not self._playing:
+                                        return
+                                    pass
 
                         if not self._playing:
                             return
@@ -2907,6 +2915,27 @@ class AutoClickerApp:
         ttk.Checkbutton(f, text="循环播放",
                         variable=self.var_loop).pack(side='left', padx=12)
 
+        # 随机延迟
+        f_rand = ttk.Frame(lf3); f_rand.pack(fill='x', pady=3)
+        self.var_rand_delay = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f_rand, text="随机延迟",
+                        variable=self.var_rand_delay,
+                        command=self._on_rand_delay_change).pack(side='left')
+        self.rand_delay_frame = ttk.Frame(f_rand)
+        self.rand_delay_frame.pack(side='left', padx=8)
+        ttk.Label(self.rand_delay_frame, text="范围:").pack(side='left')
+        self.var_rand_delay_min = tk.DoubleVar(value=0.5)
+        self.var_rand_delay_max = tk.DoubleVar(value=2.0)
+        self.spb_rand_min = ttk.Spinbox(self.rand_delay_frame, from_=0.0, to=60.0,
+                     textvariable=self.var_rand_delay_min, width=5, increment=0.1)
+        self.spb_rand_min.pack(side='left', padx=2)
+        ttk.Label(self.rand_delay_frame, text="~").pack(side='left')
+        self.spb_rand_max = ttk.Spinbox(self.rand_delay_frame, from_=0.0, to=60.0,
+                     textvariable=self.var_rand_delay_max, width=5, increment=0.1)
+        self.spb_rand_max.pack(side='left', padx=2)
+        ttk.Label(self.rand_delay_frame, text="秒", foreground='gray').pack(side='left')
+        self._on_rand_delay_change()
+
         # 容错范围
         f2 = ttk.Frame(lf3); f2.pack(fill='x', pady=3)
         ttk.Label(f2, text="容错范围:", width=10,
@@ -3652,6 +3681,13 @@ class AutoClickerApp:
             canvas.create_text(center, center, text='0',
                                font=('Consolas', 8), fill='gray')
 
+    def _on_rand_delay_change(self):
+        """随机延迟开关变化时启用/禁用范围输入"""
+        enabled = self.var_rand_delay.get()
+        state = 'normal' if enabled else 'disabled'
+        self.spb_rand_min.config(state=state)
+        self.spb_rand_max.config(state=state)
+
     def _on_radius_change(self, var, canvas):
         """容错范围变化时更新圆圈预览"""
         try:
@@ -3959,7 +3995,10 @@ class AutoClickerApp:
         self.recorder.play(events=events, speed=self.var_play_speed.get(),
                           loop=self.var_loop.get(), on_progress=on_progress, on_done=on_done,
                           rec_resolution=(self.recorder._rec_w, self.recorder._rec_h),
-                          radius=self.var_play_radius.get())
+                          radius=self.var_play_radius.get(),
+                          rand_delay=self.var_rand_delay.get(),
+                          rand_delay_min=self.var_rand_delay_min.get(),
+                          rand_delay_max=self.var_rand_delay_max.get())
 
     def _play_finished(self, err):
         self.btn_play.config(state='normal')
@@ -4110,7 +4149,10 @@ class AutoClickerApp:
         self.recorder.play(events=self._current_events, speed=self.var_play_speed.get(),
                           loop=self.var_loop.get(), on_progress=on_progress, on_done=on_done,
                           rec_resolution=tuple(rec_res) if rec_res else None,
-                          radius=self.var_play_radius.get())
+                          radius=self.var_play_radius.get(),
+                          rand_delay=self.var_rand_delay.get(),
+                          rand_delay_min=self.var_rand_delay_min.get(),
+                          rand_delay_max=self.var_rand_delay_max.get())
         cur_w, cur_h = pyautogui.size().width, pyautogui.size().height
         if rec_res and (rec_res[0] != cur_w or rec_res[1] != cur_h):
             self.sv_status.set(f"🔄 复现: {rec['name']} (自动缩放 {rec_res[0]}×{rec_res[1]} → {cur_w}×{cur_h})")
