@@ -30,6 +30,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Callable, Tuple
 
+# Windows 高DPI感知：确保 pyautogui/pynput 坐标与物理像素一致
+# 必须在 tkinter 初始化之前设置
+if sys.platform == 'win32':
+    try:
+        import ctypes
+        # Per-Monitor DPI Aware (Win8.1+)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
 # 单文件打包时 __file__ 在临时目录，用 EXE 所在目录代替
 _APP_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 
