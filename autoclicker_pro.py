@@ -213,8 +213,10 @@ class FlowStep:
         
         # 分支
         self.branch_enabled = False
+        self.branch_type = 'condition'  # 'condition'=条件跳转, 'always'=无条件跳转
         self.branch_match_next = None     # 匹配成功跳转的步骤ID
         self.branch_nomatch_next = None   # 未匹配跳转的步骤ID
+        self.branch_always_next = None    # 无条件跳转的步骤ID
         
         # UI状态
         self.canvas_x = 0
@@ -246,8 +248,10 @@ class FlowStep:
             'delay_after': self.delay_after,
             'timeout': self.timeout,
             'branch_enabled': self.branch_enabled,
+            'branch_type': self.branch_type,
             'branch_match_next': self.branch_match_next,
             'branch_nomatch_next': self.branch_nomatch_next,
+            'branch_always_next': self.branch_always_next,
             'canvas_x': self.canvas_x,
             'canvas_y': self.canvas_y,
             'is_mainline': self.is_mainline
@@ -285,8 +289,10 @@ class FlowStep:
         step.delay_after = d.get('delay_after', 100)
         step.timeout = d.get('timeout', 10000)
         step.branch_enabled = d.get('branch_enabled', False)
+        step.branch_type = d.get('branch_type', 'condition')
         step.branch_match_next = d.get('branch_match_next')
         step.branch_nomatch_next = d.get('branch_nomatch_next')
+        step.branch_always_next = d.get('branch_always_next')
         step.canvas_x = d.get('canvas_x', 0)
         step.canvas_y = d.get('canvas_y', 0)
         step.is_mainline = d.get('is_mainline', True)
@@ -415,14 +421,15 @@ class FlowEngine:
                 err = "流程为空，没有可执行的步骤"
                 return
             current_id = project.mainline_order[0]
-            visited = set()
-            iteration_count = 0
-            MAX_ITERATIONS = 10000  # 防止无限循环的最大迭代次数
+            step_visits = {}  # step_id -> visit_count，防止无限循环
+            MAX_VISITS_PER_STEP = 50  # 每个步骤最多执行50次
             
             while self._running:
-                iteration_count += 1
-                if iteration_count > MAX_ITERATIONS:
-                    err = f"流程执行超过 {MAX_ITERATIONS} 次迭代，已自动停止（可能存在无限循环）"
+                # 检查循环次数
+                visit_count = step_visits.get(current_id, 0) + 1
+                step_visits[current_id] = visit_count
+                if visit_count > MAX_VISITS_PER_STEP:
+                    err = f"步骤 {current_id} 已执行 {MAX_VISITS_PER_STEP} 次，可能存在无限循环"
                     break
                     
                 with self._lock:
@@ -432,11 +439,6 @@ class FlowEngine:
                 if not step:
                     break
                     
-                # 防止无限循环
-                if current_id in visited and not step.branch_enabled:
-                    break
-                visited.add(current_id)
-                
                 # 回调
                 if on_step_start:
                     self._safe_call(on_step_start, step.id)
@@ -456,12 +458,14 @@ class FlowEngine:
                     current_id = next_id
                 elif step.branch_enabled:
                     # 分支模式
-                    if success and step.branch_match_next:
+                    if step.branch_type == 'always' and step.branch_always_next:
+                        # 无条件跳转
+                        current_id = step.branch_always_next
+                    elif success and step.branch_match_next:
                         current_id = step.branch_match_next
                     elif not success and step.branch_nomatch_next:
                         current_id = step.branch_nomatch_next
                     else:
-                        # 默认下一个
                         current_id = self._get_next_mainline(project, current_id)
                 else:
                     current_id = self._get_next_mainline(project, current_id)
@@ -1434,12 +1438,24 @@ class StepEditDialog(tk.Toplevel):
         ttk.Checkbutton(parent, text="启用分支逻辑", variable=self.var_branch_enabled,
                         command=self._on_branch_change).pack(anchor='w', pady=8)
         
-        # 分支设置
-        self.branch_settings_frame = ttk.LabelFrame(parent, text="分支跳转", padding=8)
-        self.branch_settings_frame.pack(fill='x', pady=4)
+        # 分支类型选择
+        self.branch_type_frame = ttk.LabelFrame(parent, text="分支类型", padding=8)
+        self.branch_type_frame.pack(fill='x', pady=4)
+        
+        self.var_branch_type = tk.StringVar(value='condition')
+        ttk.Radiobutton(self.branch_type_frame, text="条件跳转 - 根据匹配成功/失败跳转到不同步骤",
+                        variable=self.var_branch_type, value='condition',
+                        command=self._on_branch_type_change).pack(anchor='w', pady=2)
+        ttk.Radiobutton(self.branch_type_frame, text="无条件跳转 - 始终跳转到指定步骤",
+                        variable=self.var_branch_type, value='always',
+                        command=self._on_branch_type_change).pack(anchor='w', pady=2)
+        
+        # 条件跳转设置
+        self.branch_condition_frame = ttk.LabelFrame(parent, text="条件跳转", padding=8)
+        self.branch_condition_frame.pack(fill='x', pady=4)
         
         # 匹配成功跳转
-        f1 = ttk.Frame(self.branch_settings_frame)
+        f1 = ttk.Frame(self.branch_condition_frame)
         f1.pack(fill='x', pady=4)
         ttk.Label(f1, text="匹配成功 →", width=12, anchor='e').pack(side='left')
         self.var_branch_match = tk.StringVar()
@@ -1447,12 +1463,23 @@ class StepEditDialog(tk.Toplevel):
         self.cb_match.pack(side='left', fill='x', expand=True)
         
         # 未匹配跳转
-        f2 = ttk.Frame(self.branch_settings_frame)
+        f2 = ttk.Frame(self.branch_condition_frame)
         f2.pack(fill='x', pady=4)
         ttk.Label(f2, text="未匹配 →", width=12, anchor='e').pack(side='left')
         self.var_branch_nomatch = tk.StringVar()
         self.cb_nomatch = ttk.Combobox(f2, textvariable=self.var_branch_nomatch, width=30, state='readonly')
         self.cb_nomatch.pack(side='left', fill='x', expand=True)
+        
+        # 无条件跳转设置
+        self.branch_always_frame = ttk.LabelFrame(parent, text="无条件跳转", padding=8)
+        self.branch_always_frame.pack(fill='x', pady=4)
+        
+        f3 = ttk.Frame(self.branch_always_frame)
+        f3.pack(fill='x', pady=4)
+        ttk.Label(f3, text="跳转到 →", width=12, anchor='e').pack(side='left')
+        self.var_branch_always = tk.StringVar()
+        self.cb_always = ttk.Combobox(f3, textvariable=self.var_branch_always, width=30, state='readonly')
+        self.cb_always.pack(side='left', fill='x', expand=True)
         
         # 说明
         ttk.Label(parent, text="提示: 选择「下一步」将按主线顺序执行", 
@@ -1460,6 +1487,7 @@ class StepEditDialog(tk.Toplevel):
         
         self._update_branch_options()
         self._on_branch_change()
+        self._on_branch_type_change()
         
     def _update_branch_options(self):
         """更新分支下拉选项"""
@@ -1471,6 +1499,17 @@ class StepEditDialog(tk.Toplevel):
                 options.append(f"{sid}: {desc[:20]}")
         self.cb_match['values'] = options
         self.cb_nomatch['values'] = options
+        self.cb_always['values'] = options
+        
+    def _on_branch_type_change(self):
+        """分支类型变化时切换显示"""
+        branch_type = self.var_branch_type.get()
+        if branch_type == 'condition':
+            self.branch_condition_frame.pack(fill='x', pady=4, before=self.branch_always_frame)
+            self.branch_always_frame.pack_forget()
+        else:
+            self.branch_always_frame.pack(fill='x', pady=4, before=self.branch_condition_frame)
+            self.branch_condition_frame.pack_forget()
         
     def _load_values(self):
         """加载步骤值"""
@@ -1508,6 +1547,7 @@ class StepEditDialog(tk.Toplevel):
         self.var_drag_duration.set(s.drag_duration)
         
         self.var_branch_enabled.set(s.branch_enabled)
+        self.var_branch_type.set(s.branch_type)
         if s.branch_match_next:
             step = self.project.get_step(s.branch_match_next)
             if step:
@@ -1516,6 +1556,10 @@ class StepEditDialog(tk.Toplevel):
             step = self.project.get_step(s.branch_nomatch_next)
             if step:
                 self.var_branch_nomatch.set(f"{s.branch_nomatch_next}: {step.description[:20] or s.branch_nomatch_next}")
+        if s.branch_always_next:
+            step = self.project.get_step(s.branch_always_next)
+            if step:
+                self.var_branch_always.set(f"{s.branch_always_next}: {step.description[:20] or s.branch_always_next}")
                 
         # 更新预览
         if s.match_image_data is not None:
@@ -1526,6 +1570,7 @@ class StepEditDialog(tk.Toplevel):
         self._on_click_mode_change()
         self._on_drag_mode_change()
         self._on_branch_change()
+        self._on_branch_type_change()
         
     def _on_match_type_change(self):
         is_pos = self.var_match_type.get() == MATCH_POSITION
@@ -1602,11 +1647,17 @@ class StepEditDialog(tk.Toplevel):
     def _on_branch_change(self):
         enabled = self.var_branch_enabled.get()
         state = 'normal' if enabled else 'disabled'
-        for w in self.branch_settings_frame.winfo_children():
-            if isinstance(w, ttk.Frame):
-                for child in w.winfo_children():
+        for frame in [self.branch_type_frame, self.branch_condition_frame, self.branch_always_frame]:
+            for w in frame.winfo_children():
+                if isinstance(w, ttk.Frame):
+                    for child in w.winfo_children():
+                        try:
+                            child.configure(state=state)
+                        except:
+                            pass
+                elif isinstance(w, ttk.Radiobutton):
                     try:
-                        child.configure(state=state)
+                        w.configure(state=state)
                     except:
                         pass
                         
@@ -1857,6 +1908,7 @@ class StepEditDialog(tk.Toplevel):
         s.drag_duration = self.var_drag_duration.get()
         
         s.branch_enabled = self.var_branch_enabled.get()
+        s.branch_type = self.var_branch_type.get()
         # 解析分支跳转
         match_val = self.var_branch_match.get()
         if match_val and ':' in match_val:
@@ -1868,6 +1920,11 @@ class StepEditDialog(tk.Toplevel):
             s.branch_nomatch_next = nomatch_val.split(':')[0]
         else:
             s.branch_nomatch_next = None
+        always_val = self.var_branch_always.get()
+        if always_val and ':' in always_val:
+            s.branch_always_next = always_val.split(':')[0]
+        else:
+            s.branch_always_next = None
             
         self.result = True
         self.destroy()
