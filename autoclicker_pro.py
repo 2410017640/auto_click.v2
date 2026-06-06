@@ -722,6 +722,7 @@ class ClickEngine:
               radius, on_progress, on_done,
               rand_delay=False, rand_delay_min=0.5, rand_delay_max=2.0):
         import random as _rnd
+        interval = max(interval_ms / 1000.0 / speed, 0.005)
         clicked = 0
         err = None
         try:
@@ -741,11 +742,9 @@ class ClickEngine:
                         pass
                 if 0 < count <= clicked:
                     break
-                # 延迟
                 if rand_delay:
                     time.sleep(_rnd.uniform(rand_delay_min, rand_delay_max))
                 else:
-                    interval = max(interval_ms / 1000.0 / speed, 0.005)
                     time.sleep(interval)
         except pyautogui.FailSafeException:
             err = "安全退出：鼠标已移至屏幕左上角"
