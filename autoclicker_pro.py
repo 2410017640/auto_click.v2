@@ -700,7 +700,8 @@ class ClickEngine:
 
     def start(self, x, y, count, interval_ms,
               button='left', speed=1.0, radius=0,
-              on_progress=None, on_done=None):
+              on_progress=None, on_done=None,
+              rand_delay=False, rand_delay_min=0.5, rand_delay_max=2.0):
         with self._lock:
             if self._running:
                 return
@@ -709,7 +710,7 @@ class ClickEngine:
         threading.Thread(
             target=self._loop,
             args=(x, y, count, interval_ms, button, speed, radius,
-                  on_progress, on_done),
+                  on_progress, on_done, rand_delay, rand_delay_min, rand_delay_max),
             daemon=True
         ).start()
 
@@ -718,8 +719,9 @@ class ClickEngine:
             self._running = False
 
     def _loop(self, x, y, count, interval_ms, button, speed,
-              radius, on_progress, on_done):
-        interval = max(interval_ms / 1000.0 / speed, 0.005)
+              radius, on_progress, on_done,
+              rand_delay=False, rand_delay_min=0.5, rand_delay_max=2.0):
+        import random as _rnd
         clicked = 0
         err = None
         try:
@@ -739,7 +741,12 @@ class ClickEngine:
                         pass
                 if 0 < count <= clicked:
                     break
-                time.sleep(interval)
+                # 延迟
+                if rand_delay:
+                    time.sleep(_rnd.uniform(rand_delay_min, rand_delay_max))
+                else:
+                    interval = max(interval_ms / 1000.0 / speed, 0.005)
+                    time.sleep(interval)
         except pyautogui.FailSafeException:
             err = "安全退出：鼠标已移至屏幕左上角"
         except Exception as e:
@@ -2534,6 +2541,35 @@ class AutoClickerApp:
         ttk.Label(f, text="毫秒 (ms)",
                   foreground='gray').pack(side='left', padx=6)
 
+        # 随机延迟（单点点击）
+        f_rand = ttk.Frame(lf_set); f_rand.pack(fill='x', pady=3)
+        self.var_single_rand_delay = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f_rand, text="随机延迟",
+                        variable=self.var_single_rand_delay,
+                        command=self._on_single_rand_delay_change).pack(side='left')
+        self.single_rand_frame = ttk.Frame(f_rand)
+        self.single_rand_frame.pack(side='left', padx=8)
+        ttk.Label(self.single_rand_frame, text="范围:").pack(side='left')
+        self.var_single_rand_min = tk.DoubleVar(value=0.5)
+        self.var_single_rand_max = tk.DoubleVar(value=2.0)
+        self.spb_single_rand_min = ttk.Spinbox(self.single_rand_frame, from_=0.0, to=60.0,
+                     textvariable=self.var_single_rand_min, width=5, increment=0.1,
+                     command=self._update_single_rand_labels)
+        self.spb_single_rand_min.pack(side='left', padx=2)
+        self.lbl_single_rand_min = ttk.Label(self.single_rand_frame, text="0.5", width=4, foreground='#0078D4')
+        self.lbl_single_rand_min.pack(side='left')
+        ttk.Label(self.single_rand_frame, text="~").pack(side='left', padx=2)
+        self.spb_single_rand_max = ttk.Spinbox(self.single_rand_frame, from_=0.0, to=60.0,
+                     textvariable=self.var_single_rand_max, width=5, increment=0.1,
+                     command=self._update_single_rand_labels)
+        self.spb_single_rand_max.pack(side='left', padx=2)
+        self.lbl_single_rand_max = ttk.Label(self.single_rand_frame, text="2.0", width=4, foreground='#0078D4')
+        self.lbl_single_rand_max.pack(side='left')
+        ttk.Label(self.single_rand_frame, text="秒", foreground='gray').pack(side='left')
+        self.var_single_rand_min.trace_add('write', lambda *_: self._update_single_rand_labels())
+        self.var_single_rand_max.trace_add('write', lambda *_: self._update_single_rand_labels())
+        self._on_single_rand_delay_change()
+
         # 速度倍率
         f = ttk.Frame(lf_set); f.pack(fill='x', pady=3)
         ttk.Label(f, text="速度倍率:", width=10,
@@ -2927,13 +2963,21 @@ class AutoClickerApp:
         self.var_rand_delay_min = tk.DoubleVar(value=0.5)
         self.var_rand_delay_max = tk.DoubleVar(value=2.0)
         self.spb_rand_min = ttk.Spinbox(self.rand_delay_frame, from_=0.0, to=60.0,
-                     textvariable=self.var_rand_delay_min, width=5, increment=0.1)
+                     textvariable=self.var_rand_delay_min, width=5, increment=0.1,
+                     command=self._update_rand_delay_labels)
         self.spb_rand_min.pack(side='left', padx=2)
-        ttk.Label(self.rand_delay_frame, text="~").pack(side='left')
+        self.lbl_rand_min = ttk.Label(self.rand_delay_frame, text="0.5", width=4, foreground='#0078D4')
+        self.lbl_rand_min.pack(side='left')
+        ttk.Label(self.rand_delay_frame, text="~").pack(side='left', padx=2)
         self.spb_rand_max = ttk.Spinbox(self.rand_delay_frame, from_=0.0, to=60.0,
-                     textvariable=self.var_rand_delay_max, width=5, increment=0.1)
+                     textvariable=self.var_rand_delay_max, width=5, increment=0.1,
+                     command=self._update_rand_delay_labels)
         self.spb_rand_max.pack(side='left', padx=2)
+        self.lbl_rand_max = ttk.Label(self.rand_delay_frame, text="2.0", width=4, foreground='#0078D4')
+        self.lbl_rand_max.pack(side='left')
         ttk.Label(self.rand_delay_frame, text="秒", foreground='gray').pack(side='left')
+        self.var_rand_delay_min.trace_add('write', lambda *_: self._update_rand_delay_labels())
+        self.var_rand_delay_max.trace_add('write', lambda *_: self._update_rand_delay_labels())
         self._on_rand_delay_change()
 
         # 容错范围
@@ -3527,9 +3571,16 @@ class AutoClickerApp:
         if ctype == 'double':
             self._start_double_click(x, y, count, interval, button, speed, radius, on_progress, on_done)
         else:
-            self.engine.start(x, y, actual_count, interval, button, speed, radius, on_progress, on_done)
+            self.engine.start(x, y, actual_count, interval, button, speed, radius, on_progress, on_done,
+                             rand_delay=self.var_single_rand_delay.get(),
+                             rand_delay_min=self.var_single_rand_min.get(),
+                             rand_delay_max=self.var_single_rand_max.get())
 
     def _start_double_click(self, x, y, count, interval_ms, button, speed, radius, on_progress, on_done):
+        import random as _rnd
+        rand_on = self.var_single_rand_delay.get()
+        rand_min = self.var_single_rand_min.get()
+        rand_max = self.var_single_rand_max.get()
         # 使用 ClickEngine 的公开接口启动，避免直接操作私有变量
         if self.engine.running:
             return
@@ -3561,7 +3612,10 @@ class AutoClickerApp:
                             pass
                     if 0 < count <= clicked:
                         break
-                    time.sleep(interval)
+                    if rand_on:
+                        time.sleep(_rnd.uniform(rand_min, rand_max))
+                    else:
+                        time.sleep(interval)
             except pyautogui.FailSafeException:
                 err = "安全退出：鼠标已移至屏幕左上角"
             except Exception as e:
@@ -3687,6 +3741,45 @@ class AutoClickerApp:
         state = 'normal' if enabled else 'disabled'
         self.spb_rand_min.config(state=state)
         self.spb_rand_max.config(state=state)
+        self._update_rand_delay_labels()
+
+    def _update_rand_delay_labels(self):
+        """更新随机延迟范围值标签"""
+        try:
+            mn = self.var_rand_delay_min.get()
+        except (tk.TclError, ValueError):
+            mn = 0.0
+        try:
+            mx = self.var_rand_delay_max.get()
+        except (tk.TclError, ValueError):
+            mx = 0.0
+        if hasattr(self, 'lbl_rand_min'):
+            self.lbl_rand_min.config(text=f"{mn:.1f}")
+        if hasattr(self, 'lbl_rand_max'):
+            self.lbl_rand_max.config(text=f"{mx:.1f}")
+
+    def _on_single_rand_delay_change(self):
+        """单点点击随机延迟开关"""
+        enabled = self.var_single_rand_delay.get()
+        state = 'normal' if enabled else 'disabled'
+        self.spb_single_rand_min.config(state=state)
+        self.spb_single_rand_max.config(state=state)
+        self._update_single_rand_labels()
+
+    def _update_single_rand_labels(self):
+        """更新单点点击随机延迟值标签"""
+        try:
+            mn = self.var_single_rand_min.get()
+        except (tk.TclError, ValueError):
+            mn = 0.0
+        try:
+            mx = self.var_single_rand_max.get()
+        except (tk.TclError, ValueError):
+            mx = 0.0
+        if hasattr(self, 'lbl_single_rand_min'):
+            self.lbl_single_rand_min.config(text=f"{mn:.1f}")
+        if hasattr(self, 'lbl_single_rand_max'):
+            self.lbl_single_rand_max.config(text=f"{mx:.1f}")
 
     def _on_radius_change(self, var, canvas):
         """容错范围变化时更新圆圈预览"""
